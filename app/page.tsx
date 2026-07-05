@@ -17,6 +17,12 @@ export default function Home() {
           >
             View Users
           </Link>
+          <Link
+            href="/users/teachers"
+            className="px-6 py-3 rounded-full border border-black text-black dark:border-white dark:text-white font-medium hover:opacity-90 transition-opacity"
+          >
+            View Teachers
+          </Link>
         </div>
       </main>
     </div>

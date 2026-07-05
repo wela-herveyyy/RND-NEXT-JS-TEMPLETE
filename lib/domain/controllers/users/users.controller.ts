@@ -1,18 +1,23 @@
+import {
+  getTeacherUsers as getTeacherUsersService,
+  getUsers as getUsersService,
+} from "@/lib/domain/services/users.service";
+import type { UserSelect } from "@/lib/entities/users.type";
 
-import { UserSelect } from "@/lib/entities/users.type";
-import { IUsersController } from "./users.interface";
-import { UsersService } from "@/lib/domain/services/users.service";
+export async function getUsers(): Promise<UserSelect[]> {
+  try {
+    return await getUsersService();
+  } catch (error) {
+    console.error(error);
+    throw error;
+  }
+}
 
-export class UsersController implements IUsersController {
-  constructor(private readonly usersService: UsersService) { }
-
-  async getUsers(): Promise<UserSelect[]> {
-    try {
-      const result = await this.usersService.getUsers();
-      return result;
-    } catch (error) {
-      console.error(error);
-      throw error;
-    }
+export async function getTeacherUsers(): Promise<UserSelect[]> {
+  try {
+    return await getTeacherUsersService();
+  } catch (error) {
+    console.error(error);
+    throw error;
   }
 }
