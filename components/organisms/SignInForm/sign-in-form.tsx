@@ -4,8 +4,8 @@ import { getSession } from "@/lib/domain/services/auth.service";
 import { AuthShell } from "@/components/organisms/AuthShell/AuthShell";
 import { LabelInput } from "@/components/molecules/LabelInput/LabelInput";
 import { Button } from "@/components/atoms/Button/Button";
-import { useAuthFormSubmitStyles } from "@/components/atoms/Button/button.hooks";
 import { getSignInFormState } from "./signInForm.hooks";
+import { useAuthFormSubmitStyles } from "@/components/atoms/Button/button.hooks";
 
 type SignInFormProps = {
   searchParams: Promise<{ error?: string; callbackURL?: string }>;
