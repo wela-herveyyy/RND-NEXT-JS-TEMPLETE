@@ -6,6 +6,44 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
 
 ---
 
+## Table of contents
+
+- [Stack](#stack)
+- [Dependencies](#dependencies)
+  - [Runtime](#runtime-dependencies)
+  - [Development](#development-devdependencies)
+  - [npm scripts (database)](#npm-scripts-database)
+- [Repository layout (high level)](#repository-layout-high-level)
+- [Domain layer — request flow](#domain-layer--request-flow)
+  - [Reads vs writes](#reads-vs-writes)
+  - [`lib/domain/actions/` — server actions (AAA)](#libdomainactions--server-actions-aaa)
+  - [AAA in actions (inline template)](#aaa-in-actions-inline-template)
+  - [`lib/domain/services/` — orchestration](#libdomainservices--orchestration)
+  - [`lib/domain/usecases/` — one operation per file](#libdomainusecases--one-operation-per-file)
+  - [`lib/entities/` — shared types](#libentities--shared-types)
+- [Auth](#auth)
+  - [Better Auth (`auth.ts`)](#better-auth-authts)
+  - [Environment](#environment)
+  - [Route protection (`proxy.ts`)](#route-protection-proxyts)
+  - [Auth UI](#auth-ui)
+- [Next.js frontend structure (`app/` + `components/`)](#nextjs-frontend-structure-app--components)
+  - [`app/` — App Router](#app--app-router)
+  - [`components/` — Atomic design](#components--atomic-design)
+  - [Actions vs UI hooks](#actions-vs-ui-hooks)
+  - [Conventions](#conventions)
+- [Workflows — per `table_name`](#workflows--per-table_name)
+  - [End-to-end overview](#end-to-end-overview)
+  - [1. Add a new table (server data)](#1-add-a-new-table-server-data)
+  - [2. Add UI for a table](#2-add-ui-for-a-table)
+  - [3. Add a page for a table](#3-add-a-page-for-a-table)
+  - [4. HTTP API route (optional)](#4-http-api-route-optional)
+  - [Quick reference checklist](#quick-reference-checklist)
+- [Full code samples by folder](#full-code-samples-by-folder)
+- [Cross-cutting concerns](#cross-cutting-concerns)
+- [Version reference](#version-reference)
+
+---
+
 ## Stack
 
 | Layer | Technology | Notes |
@@ -69,7 +107,7 @@ rnd-nextjs-template/
 ├── components/             # UI: atomic design (atoms → molecules → organisms)
 ├── lib/
 │   ├── domain/
-│   │   ├── actions/        # Server Actions — mutations only ("use server")
+│   │   ├── actions/        # Server Actions — reads + writes with inline AAA ("use server")
 │   │   ├── services/       # Orchestration — reads + write delegation
 │   │   └── usecases/       # Single-purpose DB / auth operations
 │   └── entities/           # Domain types inferred from schema
@@ -84,7 +122,7 @@ rnd-nextjs-template/
 └── tsconfig.json
 ```
 
-**There are no controllers.** Pages, proxy, and forms import **services** (reads) or **actions** (mutations) directly.
+**There are no controllers.** Pages and hooks import **actions** (gated reads + writes). **Services** are called from actions. **Proxy** and auth UI use **services** for session checks only.
 
 ---
 
@@ -92,53 +130,137 @@ rnd-nextjs-template/
 
 ### Reads vs writes
 
+Both **reads** and **writes** enter through **actions** with the same inline AAA template. Actions call **services**, which call **use cases**.
+
 ```mermaid
 flowchart TB
-  subgraph reads ["READS"]
-    Page["app/**/page.tsx<br/>proxy.ts"]
-    Page --> ServiceR["lib/domain/services/*.service.ts"]
-    ServiceR --> UseCaseR["lib/domain/usecases/**"]
-    UseCaseR --> DB[("database/")]
-  end
-
-  subgraph writes ["WRITES (mutations)"]
+  subgraph entry ["ENTRY"]
+    Page["app/**/page.tsx"]
     Form["Server form<br/>action={...Action}"]
     Hook["Client hook<br/>handleDelete()"]
-    Form --> Actions["lib/domain/actions/*.actions.ts"]
-    Hook --> Actions
-    Actions --> ServiceW["lib/domain/services/*.service.ts"]
-    ServiceW --> UseCaseW["lib/domain/usecases/**"]
-    UseCaseW --> DB
   end
+
+  subgraph domain ["DOMAIN"]
+    Actions["lib/domain/actions/*.actions.ts<br/>AAA: auth → hasPermission → logAction"]
+    Service["lib/domain/services/*.service.ts"]
+    UseCase["lib/domain/usecases/**"]
+    DB[("database/")]
+  end
+
+  Page --> Actions
+  Form --> Actions
+  Hook --> Actions
+  Actions --> Service --> UseCase --> DB
 ```
 
-| Call type | Entry point | Next layer | Example |
-|-----------|-------------|------------|---------|
-| **Read** | Page, `proxy.ts` | `*.service.ts` → use case | `getUsers()` in `app/users/page.tsx` |
-| **Write** | Form / UI hook | `*.actions.ts` → service → use case | `deleteUserAction` → `deleteUser()` |
+| Call type | Entry point | Action | Service | Example |
+|-----------|-------------|--------|---------|---------|
+| **Read** (gated) | Page | AAA + service | use case | `getUsersAction()` in `app/users/page.tsx` |
+| **Write** | Form / UI hook | AAA + service | use case | `deleteUserAction` → `deleteUser()` |
 
-### `lib/domain/actions/` — mutations only
+Pages check `{ ok: false }` from read actions and redirect to sign-in. Mutations use `redirect()` with `?error=` query params.
+
+### `lib/domain/actions/` — server actions (AAA)
 
 - Files are marked `"use server"`.
-- Parse `FormData`, call the matching **service** function, handle `redirect()` / error query params.
-- Imported directly by server forms (`action={signInAction}`) or by **UI hooks** on the client (`handleDelete` → `deleteUserAction`).
+- Every **protected** action follows the same **AAA inline template** inside a `try/catch`:
+  1. **Authentication** — `const userSession = await auth()` from `auth.service.ts`
+  2. **Authorization** — `hasPermission(userSession.user.role, USER_PERMISSION.…)` from `users.type.ts`
+  3. **Accounting** — `logAction(...)` on success and failure via `log_action.usecase.ts`
+- Parse `FormData`, call the matching **service** function, handle `redirect()` / `{ ok: false, error }`.
+- Imported directly by pages, server forms, or UI hooks.
 - **No route-level `app/**/actions.ts`** — actions live in `lib/domain/actions/<table>.actions.ts`.
+- **Auth actions** (`signInAction`, etc.) skip AAA — the user is not signed in yet.
+
+**Action template (copy into every protected action):**
+
+```ts
+export async function getUsersAction(): Promise<UserResult<UserSelect[]>> {
+  const action = "users:list";
+
+  try {
+    // 1. Authentication
+    const userSession = await auth();
+    if (!userSession || userSession.expired) {
+      await logAction({ userId: "anonymous", action, success: false, error: "Authentication required." });
+      return { ok: false, error: "Authentication required." };
+    }
+
+    // 2. Authorization
+    if (!hasPermission(userSession.user.role, USER_PERMISSION.USERS_READ)) {
+      await logAction({ userId: userSession.user.id, action, success: false, error: "Not authorized.", role: userSession.user.role });
+      return { ok: false, error: "You are not authorized for this action." };
+    }
+
+    const users = await getUsers();
+
+    // 3. Accounting
+    await logAction({ userId: userSession.user.id, action, success: true, role: userSession.user.role });
+
+    return { ok: true, data: users };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unexpected error.";
+    await logAction({ userId: "unknown", action, success: false, error: message });
+    return { ok: false, error: message };
+  }
+}
+```
+
+**Role permissions** — defined in `lib/entities/users.type.ts`:
+
+| Role | Permissions |
+|------|-------------|
+| `owner`, `admin` | `users:read`, `users:delete` |
+| `tech`, `sales`, `dev`, `qa`, `po`, `pm`, `finance` | `users:read` |
+
+```ts
+export const USER_ROLE = {
+  OWNER: "owner",
+  ADMIN: "admin",
+  TECH: "tech",
+  SALES: "sales",
+  DEV: "dev",
+  QA: "qa",
+  PO: "po",
+  PM: "pm",
+  FINANCE: "finance",
+} as const;
+```
+
+### AAA in actions (inline template)
+
+No shared AAA module — each action file repeats the template above so the flow stays visible.
+
+```mermaid
+flowchart LR
+  Action["users.actions.ts"] --> AuthN["1. auth()"]
+  AuthN --> AuthZ["2. hasPermission(role)"]
+  AuthZ --> Run["service → usecase"]
+  Run --> Acct["3. logAction()"]
+```
+
+| Step | Code | Purpose |
+|------|------|---------|
+| **Authentication** | `await auth()` | Session + role; `null` or `expired` → error |
+| **Authorization** | `hasPermission(role, permission)` | Role must allow the action |
+| **Accounting** | `await logAction({...})` | Audit log on every outcome |
 
 | File | Exports |
 |------|---------|
 | `auth.actions.ts` | `signInAction`, `signUpAction`, `signOutAction` |
-| `users.actions.ts` | `deleteUserAction` |
+| `users.actions.ts` | `getUsersAction`, `getDevUsersAction`, `deleteUserAction` |
 
 ### `lib/domain/services/` — orchestration
 
 - Compose use cases; no `"use server"`.
-- **Pages and proxy import services for reads.**
-- **Actions import services for writes.**
+- **Actions import services** for both reads and writes.
+- **Auth UI and proxy** import services for session checks (`getSession`, `getSessionFromHeaders`).
+- **`auth()`** loads session + DB role for AAA in actions.
 
-| File | Reads | Writes |
-|------|-------|--------|
-| `auth.service.ts` | `getSession`, `getSessionFromHeaders` | `signIn`, `signUp`, `signOut` |
-| `users.service.ts` | `getUsers`, `getTeacherUsers` | `deleteUser` |
+| File | Used by | Exports |
+|------|---------|---------|
+| `auth.service.ts` | actions, proxy, auth UI | `getSession`, `getSessionFromHeaders`, `auth`, `signIn`, `signUp`, `signOut` |
+| `users.service.ts` | `users.actions.ts` | `getUsers`, `getDevUsers`, `deleteUser` |
 
 ### `lib/domain/usecases/` — one operation per file
 
@@ -149,9 +271,12 @@ flowchart TB
 
 ### `lib/entities/` — shared types
 
-- Types inferred from Drizzle exports (`UserSelect`, etc.).
-- Result wrappers: `AuthResult`, `UserResult`.
-- Constants: `USER_ROLE`.
+| File | Contents |
+|------|----------|
+| `users.type.ts` | `UserSelect`, `UserInsert`, `USER_ROLE`, `USER_PERMISSION`, `ROLE_PERMISSIONS`, `hasPermission()`, `UserResult` |
+| `auth.type.ts` | `AuthUser`, `AuthSession`, `ActionSession`, `ActionLogEntry`, `AuthResult`, sign-in/up inputs |
+
+Types are inferred from Drizzle exports where applicable. Permission checks live in entity files, not in actions.
 
 ---
 
@@ -186,7 +311,9 @@ flowchart TB
 | `/sign-up` | `SignUpForm` | Server form → `signUpAction` |
 | `/` | Home | `signOutAction` when session exists |
 
-No client-side auth SDK. All auth goes through server actions and `auth.api` in use cases.
+No client-side auth SDK. Sign-in/up/out goes through `auth.actions.ts`. Protected domain actions use `auth()` from `auth.service.ts`, which loads session + DB role into `ActionSession`.
+
+**Accounting:** `logAction()` in `lib/domain/usecases/auth/log_action.usecase.ts` logs every action outcome (currently `console.info`; swap for DB/observability later).
 
 ---
 
@@ -200,11 +327,11 @@ No client-side auth SDK. All auth goes through server actions and `auth.api` in 
 | `app/page.tsx` | Home; session display; links to users; `signOutAction` form |
 | `app/sign-in/page.tsx` | Suspense wrapper → `SignInForm` organism |
 | `app/sign-up/page.tsx` | Suspense wrapper → `SignUpForm` organism |
-| `app/users/page.tsx` | `getUsers()` from service → `UsersTable` |
-| `app/users/teachers/page.tsx` | `getTeacherUsers()` from service → `UsersTable` |
+| `app/users/page.tsx` | `getUsersAction()` → `UsersTable` |
+| `app/users/teachers/page.tsx` | `getDevUsersAction()` → `UsersTable` (title: "Dev team") |
 | `app/globals.css` | Global styles (Tailwind entry) |
 
-**Pattern:** Server Components call **services** for data. Interactive UI lives in client components under `components/`. Mutations go through **actions** (server) or **UI hooks** (client handlers that call actions).
+**Pattern:** Server Components call **actions** for gated data. Interactive UI lives in client components under `components/`. Mutations go through **actions** (server) or **UI hooks** (client handlers that call actions). Auth forms and proxy use **services** for session checks.
 
 ### `components/` — Atomic design
 
@@ -274,13 +401,14 @@ flowchart TB
   end
 
   subgraph domain ["Domain (lib/)"]
-    Actions["actions/<table>.actions.ts<br/>(mutations only)"]
+    Actions["actions/<table>.actions.ts<br/>(AAA: reads + writes)"]
     Service["services/<table>.service.ts"]
     UseCase["usecases/<table>/"]
     Entity["entities/<table>.type.ts"]
     Actions --> Service --> UseCase
     Entity -.-> Service
     Entity -.-> UseCase
+    Entity -.-> Actions
   end
 
   subgraph db ["Persistence"]
@@ -289,7 +417,7 @@ flowchart TB
     Schema --> Client
   end
 
-  Page -->|"reads"| Service
+  Page -->|"reads + writes"| Actions
   Page -->|"props"| Organism
   Organism -->|"UI hooks → actions"| Actions
   UseCase --> Client
@@ -303,7 +431,7 @@ flowchart LR
   A["1. database/schema.ts"] --> B["2. lib/entities/<table>.type.ts"]
   B --> C["3. lib/domain/usecases/<table>/<action>.usecase.ts"]
   C --> D["4. lib/domain/services/<table>.service.ts"]
-  D --> E["5. lib/domain/actions/<table>.actions.ts<br/>(mutations only)"]
+  D --> E["5. lib/domain/actions/<table>.actions.ts<br/>(AAA: reads + writes)"]
   E --> F["6. app/<route>/page.tsx"]
 ```
 
@@ -313,8 +441,8 @@ flowchart LR
 | 2 | `lib/entities/<table>.type.ts` | `$inferSelect`, `$inferInsert`, result types, constants. |
 | 3 | `lib/domain/usecases/<table>/` | One file per operation. Reads: `"use cache"`. Writes: `updateTag`. |
 | 4 | `lib/domain/services/<table>.service.ts` | Compose use cases. |
-| 5 | `lib/domain/actions/<table>.actions.ts` | `"use server"` mutation entry points (if writes exist). |
-| 6 | Consumer | Page imports **service** for reads; forms/hooks import **actions** for writes. |
+| 5 | `lib/domain/actions/<table>.actions.ts` | `"use server"` entry points with inline AAA (reads + writes). |
+| 6 | Consumer | Page imports **actions** for gated reads; forms/hooks import **actions** for writes. |
 
 **Example (`user` table):**
 
@@ -324,7 +452,7 @@ flowchart LR
 | Entity | `lib/entities/users.type.ts` |
 | Use cases | `get_users.usecase.ts`, `get_users_by_role.usecase.ts`, `delete_user.usecase.ts` |
 | Service | `lib/domain/services/users.service.ts` |
-| Actions | `lib/domain/actions/users.actions.ts` → `deleteUserAction` |
+| Actions | `lib/domain/actions/users.actions.ts` → `getUsersAction`, `getDevUsersAction`, `deleteUserAction` |
 | Pages | `app/users/page.tsx`, `app/users/teachers/page.tsx` |
 | UI | `UserCard` (delete), `UsersTable` (list) |
 
@@ -347,14 +475,14 @@ For **client mutations**: implement `handleX` in molecule/organism hooks; call t
 | Step | Action |
 |------|--------|
 | 1 | Create `app/<route>/page.tsx` (Server Component). |
-| 2 | Import read function from `@/lib/domain/services/<table>.service`. |
-| 3 | `await` the service in the page. |
-| 4 | Render organism with typed props. |
-| 5 | Pass `error` from `searchParams` when actions redirect with `?error=`. |
+| 2 | Import action from `@/lib/domain/actions/<table>.actions`. |
+| 3 | `await` the action; handle `{ ok: false }` (redirect to sign-in). |
+| 4 | Render organism with `result.data` as props. |
+| 5 | Pass `error` from `searchParams` when mutation actions redirect with `?error=`. |
 
 ### 4. HTTP API route (optional)
 
-Route handlers may import **services** (reads) or **actions** / services (writes). Never query `database` directly in `route.ts`.
+Route handlers should import **actions** (AAA) or **services** (internal/unauthenticated). Never query `database` directly in `route.ts`.
 
 ### Quick reference checklist
 
@@ -364,8 +492,8 @@ Route handlers may import **services** (reads) or **actions** / services (writes
 | Types | `lib/entities/<table>.type.ts` |
 | DB operations | `lib/domain/usecases/<table>/<action>.usecase.ts` |
 | Orchestration | `lib/domain/services/<table>.service.ts` |
-| Mutations | `lib/domain/actions/<table>.actions.ts` |
-| Screen | `app/<route>/page.tsx` (reads via service) |
+| Mutations | `lib/domain/actions/<table>.actions.ts` (AAA reads + writes) |
+| Screen | `app/<route>/page.tsx` (gated reads via action) |
 | Row/card UI | `components/molecules/<Name>/` |
 | List/form UI | `components/organisms/<Name>/` |
 | Shared controls | `components/atoms/<Name>/` |
@@ -379,7 +507,8 @@ Representative current sources. Static assets in `public/` are omitted.
 ### `app/users/page.tsx`
 
 ```tsx
-import { getUsers } from "@/lib/domain/services/users.service";
+import { redirect } from "next/navigation";
+import { getUsersAction } from "@/lib/domain/actions/users.actions";
 import { UsersTable } from "@/components/organisms/UsersTable/UsersTable";
 
 type UsersPageProps = {
@@ -387,13 +516,17 @@ type UsersPageProps = {
 };
 
 export default async function UsersPage({ searchParams }: UsersPageProps) {
-  const users = await getUsers();
   const params = await searchParams;
+  const result = await getUsersAction();
+
+  if (!result.ok) {
+    redirect(`/sign-in?callbackURL=/users&error=${encodeURIComponent(result.error)}`);
+  }
 
   return (
     <main className="max-w-4xl mx-auto py-12 px-6">
       <h1 className="text-3xl font-bold mb-8">Users</h1>
-      <UsersTable users={users} redirectTo="/users" error={params.error} />
+      <UsersTable users={result.data} redirectTo="/users" error={params.error} />
     </main>
   );
 }
@@ -551,28 +684,44 @@ export async function SignInForm({ searchParams }: { searchParams: Promise<{ err
 }
 ```
 
-### `lib/domain/actions/users.actions.ts`
+### `lib/domain/actions/users.actions.ts` (excerpt)
 
 ```ts
 "use server";
 
-import { redirect } from "next/navigation";
-import { deleteUser } from "@/lib/domain/services/users.service";
+import { auth } from "@/lib/domain/services/auth.service";
+import { getUsers } from "@/lib/domain/services/users.service";
+import { logAction } from "@/lib/domain/usecases/auth/log_action.usecase";
+import { hasPermission, USER_PERMISSION, type UserResult, type UserSelect } from "@/lib/entities/users.type";
 
-export async function deleteUserAction(formData: FormData) {
-  const id = String(formData.get("id") ?? "").trim();
-  const redirectTo = String(formData.get("redirectTo") ?? "").trim() || "/users";
+export async function getUsersAction(): Promise<UserResult<UserSelect[]>> {
+  const action = "users:list";
+  const permission = USER_PERMISSION.USERS_READ;
 
-  if (!id) {
-    redirect(`${redirectTo}?error=${encodeURIComponent("User id is required")}`);
+  try {
+    const userSession = await auth();
+    if (!userSession || userSession.expired) {
+      await logAction({ userId: "anonymous", action, success: false, error: "Authentication required." });
+      return { ok: false, error: "Authentication required." };
+    }
+
+    if (!hasPermission(userSession.user.role, permission)) {
+      await logAction({ userId: userSession.user.id, action, success: false, error: "Not authorized.", role: userSession.user.role });
+      return { ok: false, error: "You are not authorized for this action." };
+    }
+
+    const users = await getUsers();
+
+    await logAction({ userId: userSession.user.id, action, success: true, role: userSession.user.role });
+    return { ok: true, data: users };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unexpected error.";
+    await logAction({ userId: "unknown", action, success: false, error: message });
+    return { ok: false, error: message };
   }
-
-  const result = await deleteUser({ id });
-  if (!result.ok) {
-    redirect(`${redirectTo}?error=${encodeURIComponent(result.error)}`);
-  }
-  redirect(redirectTo);
 }
+
+// deleteUserAction — same AAA template; uses redirect() instead of return. See full file.
 ```
 
 ### `lib/domain/services/users.service.ts`
@@ -587,8 +736,8 @@ export async function getUsers(): Promise<UserSelect[]> {
   return getUsersUseCase();
 }
 
-export async function getTeacherUsers(): Promise<UserSelect[]> {
-  return getUsersByRole(USER_ROLE.TEACHER);
+export async function getDevUsers(): Promise<UserSelect[]> {
+  return getUsersByRole(USER_ROLE.DEV);
 }
 
 export async function deleteUser(input: DeleteUserInput): Promise<UserResult> {
@@ -625,12 +774,36 @@ export type UserSelect = typeof user.$inferSelect;
 export type UserInsert = typeof user.$inferInsert;
 
 export const USER_ROLE = {
-  TEACHER: "teacher",
-  STUDENT: "student",
+  OWNER: "owner",
   ADMIN: "admin",
+  TECH: "tech",
+  SALES: "sales",
+  DEV: "dev",
+  QA: "qa",
+  PO: "po",
+  PM: "pm",
+  FINANCE: "finance",
 } as const;
 
 export type UserRole = (typeof USER_ROLE)[keyof typeof USER_ROLE];
+
+export const USER_PERMISSION = {
+  USERS_READ: "users:read",
+  USERS_DELETE: "users:delete",
+} as const;
+
+export type UserPermission = (typeof USER_PERMISSION)[keyof typeof USER_PERMISSION];
+
+export const ROLE_PERMISSIONS: Record<UserRole, UserPermission[]> = {
+  [USER_ROLE.OWNER]: [USER_PERMISSION.USERS_READ, USER_PERMISSION.USERS_DELETE],
+  [USER_ROLE.ADMIN]: [USER_PERMISSION.USERS_READ, USER_PERMISSION.USERS_DELETE],
+  [USER_ROLE.TECH]: [USER_PERMISSION.USERS_READ],
+  // ... other roles: USERS_READ only
+};
+
+export function hasPermission(role: UserRole, permission: UserPermission): boolean {
+  return ROLE_PERMISSIONS[role].includes(permission);
+}
 
 export type UserResult<T = void> =
   | { ok: true; data: T }
@@ -664,6 +837,7 @@ export const user = mysqlTable("user", {
   email: varchar("email", { length: 255 }).notNull().unique(),
   emailVerified: boolean("email_verified").default(false).notNull(),
   image: text("image"),
+  role: varchar("role", { length: 50 }).notNull().default("dev"),
   createdAt: timestamp("created_at", { fsp: 3 }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { fsp: 3 }).defaultNow().$onUpdate(() => new Date()).notNull(),
 });
@@ -727,8 +901,9 @@ export async function proxy(request: NextRequest) {
 
 - **Environment:** `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` required for auth and DB.
 - **Path alias:** `@/` maps to the project root.
-- **Separation:** UI depends on **entity types** only. Data access stays in use cases. **Reads** enter via services; **writes** enter via actions.
-- **Hooks vs actions:** Server mutations live in `lib/domain/actions/`. UI-side handlers live in co-located `<name>.hooks.ts` next to the component.
+- **Separation:** UI depends on **entity types** only. Data access stays in use cases. **Gated reads and writes** enter via actions (AAA). **Session checks** for proxy/auth UI use services directly.
+- **AAA:** Authentication (`auth()`), Authorization (`hasPermission`), Accounting (`logAction`) — inline in each protected action. No shared wrapper module.
+- **Hooks vs actions:** Server mutations and gated reads live in `lib/domain/actions/`. UI-side handlers live in co-located `<name>.hooks.ts` next to the component.
 - **Caching:** Use cases use `"use cache"`, `cacheLife("hours")`, `cacheTag("users")`. Mutations call `updateTag("users")`.
 - **No client auth SDK:** Forms and hooks invoke server actions; use cases call `auth.api.*`.
 - **Suspense:** Auth pages wrap async organisms in `<Suspense>` for `searchParams` / session reads.

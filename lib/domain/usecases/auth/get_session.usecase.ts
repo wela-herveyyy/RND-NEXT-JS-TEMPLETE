@@ -1,4 +1,3 @@
-"use server";
 import { headers } from "next/headers";
 import { auth } from "@/auth";
 import type { AuthSession } from "@/lib/entities/auth.type";
@@ -10,6 +9,7 @@ function toAuthSession(session: NonNullable<Awaited<ReturnType<typeof auth.api.g
       name: session.user.name,
       email: session.user.email,
       image: session.user.image,
+
     },
   };
 }

@@ -1,3 +1,5 @@
+import type { UserRole } from "@/lib/entities/users.type";
+
 export type SignInInput = {
   email: string;
   password: string;
@@ -27,3 +29,17 @@ export type AuthSession = {
 export type AuthResult<T = void> =
   | { ok: true; data: T }
   | { ok: false; error: string };
+
+export type ActionSession = {
+  user: AuthUser & { role: UserRole };
+  expired: boolean;
+};
+
+export type ActionLogEntry = {
+  userId: string;
+  action: string;
+  success: boolean;
+  error?: string;
+  role?: string;
+  metadata?: Record<string, unknown>;
+};

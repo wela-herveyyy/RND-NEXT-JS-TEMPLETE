@@ -7,8 +7,8 @@ export async function getUsers(): Promise<UserSelect[]> {
   return getUsersUseCase();
 }
 
-export async function getTeacherUsers(): Promise<UserSelect[]> {
-  return getUsersByRole(USER_ROLE.TEACHER);
+export async function getDevUsers(): Promise<UserSelect[]> {
+  return getUsersByRole(USER_ROLE.DEV);
 }
 
 export async function deleteUser(input: DeleteUserInput): Promise<UserResult> {

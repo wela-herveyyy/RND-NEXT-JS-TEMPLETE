@@ -44,7 +44,7 @@ async function HomeContent() {
             href="/users/teachers"
             className="px-6 py-3 rounded-full border border-black text-black dark:border-white dark:text-white font-medium hover:opacity-90 transition-opacity"
           >
-            View Teachers
+            View Dev team
           </Link>
           {session ? (
             <form action={signOutAction}>
