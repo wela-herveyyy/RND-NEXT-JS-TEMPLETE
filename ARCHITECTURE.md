@@ -2,7 +2,7 @@
 
 This document describes how **rnd-nextjs-template** is structured: runtime stack, dependencies, the Next.js App Router and `components` layout (frontend), and the domain-oriented layout under `lib` plus persistence (`database/`) used by server code.
 
-**Complete file listings** for each source folder appear in [Full code samples by folder](#full-code-samples-by-folder).
+**Representative code samples** for each layer appear in [Full code samples by folder](#full-code-samples-by-folder).
 
 ---
 
@@ -10,12 +10,13 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
 
 | Layer | Technology | Notes |
 |--------|------------|--------|
-| Framework | **Next.js 16** (`16.2.4`) | App Router; RSC by default; Server Actions in `app/actions.ts` |
+| Framework | **Next.js 16** (`16.2.4`) | App Router; RSC by default; Cache Components via `"use cache"` in use cases |
 | UI | **React 19** (`19.2.4`) | Client components opt in with `"use client"` |
 | Language | **TypeScript 5** | Strict typing; path alias `@/` (see `tsconfig.json`) |
 | Styling | **Tailwind CSS 4** | PostCSS via `@tailwindcss/postcss` |
+| Auth | **Better Auth** (`^1.6.23`) | Server-side only via `auth.api.*` in use cases; Drizzle adapter |
 | Database access | **Drizzle ORM** (`0.45.2`) | Schema in `database/schema.ts`; MySQL dialect |
-| DB driver | **mysql2** (`3.22.2`) | Used by Drizzle’s MySQL adapter |
+| DB driver | **mysql2** (`3.22.5`) | Connection pool in `database/index.ts` |
 | Env | **dotenv** (`^17.4.2`) | Loaded in `database/index.ts` for local credentials |
 | Linting | **ESLint 9** + **eslint-config-next** (`16.2.4`) | Aligned with Next.js major version |
 
@@ -27,11 +28,12 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
 
 | Package | Version (range) | Role in this project |
 |---------|-----------------|----------------------|
-| `next` | `16.2.4` | Application framework, routing, RSC, Server Actions |
+| `next` | `16.2.4` | Application framework, routing, RSC, Cache Components |
 | `react` | `19.2.4` | UI runtime |
 | `react-dom` | `19.2.4` | DOM rendering |
+| `better-auth` | `^1.6.23` | Email/password auth; session cookies via `nextCookies()` plugin |
 | `drizzle-orm` | `^0.45.2` | Type-safe SQL / schema; used in use cases |
-| `mysql2` | `^3.22.2` | MySQL connection for Drizzle |
+| `mysql2` | `^3.22.5` | MySQL connection pool for Drizzle |
 | `dotenv` | `^17.4.2` | Loads `DATABASE_URL` (and similar) for DB bootstrap |
 
 ### Development (`devDependencies`)
@@ -39,7 +41,7 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
 | Package | Version (range) | Role |
 |---------|-----------------|------|
 | `typescript` | `^5` | Type checking |
-| `@types/node` | `^20` | Node.js types |
+| `@types/node` | `^20.19.43` | Node.js types |
 | `@types/react` | `^19` | React types |
 | `@types/react-dom` | `^19` | React DOM types |
 | `tailwindcss` | `^4` | Utility-first CSS |
@@ -48,241 +50,366 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
 | `eslint-config-next` | `16.2.4` | Next.js ESLint preset |
 | `drizzle-kit` | `^0.31.10` | Migrations / Drizzle CLI (`drizzle.config.ts`) |
 
+### npm scripts (database)
+
+| Script | Command | Purpose |
+|--------|---------|---------|
+| `db:generate` | `drizzle-kit generate` | Generate migration SQL from schema changes |
+| `db:migrate` | `bun scripts/migrate.mts` | Run migrations programmatically (shows errors clearly) |
+| `db:push` | `drizzle-kit push` | Push schema directly (dev only) |
+| `db:studio` | `drizzle-kit studio` | Open Drizzle Studio |
+
 ---
 
 ## Repository layout (high level)
 
 ```
 rnd-nextjs-template/
-├── app/                    # Next.js App Router: pages, layout, server actions
+├── app/                    # Next.js App Router: pages, layout, global styles
 ├── components/             # UI: atomic design (atoms → molecules → organisms)
-├── lib/                    # Domain: controllers, services, use cases, entity types
-├── database/               # Drizzle client + schema (not under lib/)
-├── public/                 # Static assets
-├── drizzle.config.ts       # Drizzle Kit (MySQL, schema path, output dir)
+├── lib/
+│   ├── domain/
+│   │   ├── actions/        # Server Actions — mutations only ("use server")
+│   │   ├── services/       # Orchestration — reads + write delegation
+│   │   └── usecases/       # Single-purpose DB / auth operations
+│   └── entities/           # Domain types inferred from schema
+├── database/               # Drizzle client + schema
+├── auth.ts                 # Better Auth config (Drizzle adapter + nextCookies)
+├── proxy.ts                # Route protection (session guard)
+├── scripts/
+│   └── migrate.mts         # Programmatic migration runner
+├── drizzle.config.ts
 ├── next.config.ts
 ├── package.json
 └── tsconfig.json
 ```
 
+**There are no controllers.** Pages, proxy, and forms import **services** (reads) or **actions** (mutations) directly.
+
 ---
 
-## Next.js 16 frontend structure (`app/` + `components/`)
+## Domain layer — request flow
+
+### Reads vs writes
+
+```mermaid
+flowchart TB
+  subgraph reads ["READS"]
+    Page["app/**/page.tsx<br/>proxy.ts"]
+    Page --> ServiceR["lib/domain/services/*.service.ts"]
+    ServiceR --> UseCaseR["lib/domain/usecases/**"]
+    UseCaseR --> DB[("database/")]
+  end
+
+  subgraph writes ["WRITES (mutations)"]
+    Form["Server form<br/>action={...Action}"]
+    Hook["Client hook<br/>handleDelete()"]
+    Form --> Actions["lib/domain/actions/*.actions.ts"]
+    Hook --> Actions
+    Actions --> ServiceW["lib/domain/services/*.service.ts"]
+    ServiceW --> UseCaseW["lib/domain/usecases/**"]
+    UseCaseW --> DB
+  end
+```
+
+| Call type | Entry point | Next layer | Example |
+|-----------|-------------|------------|---------|
+| **Read** | Page, `proxy.ts` | `*.service.ts` → use case | `getUsers()` in `app/users/page.tsx` |
+| **Write** | Form / UI hook | `*.actions.ts` → service → use case | `deleteUserAction` → `deleteUser()` |
+
+### `lib/domain/actions/` — mutations only
+
+- Files are marked `"use server"`.
+- Parse `FormData`, call the matching **service** function, handle `redirect()` / error query params.
+- Imported directly by server forms (`action={signInAction}`) or by **UI hooks** on the client (`handleDelete` → `deleteUserAction`).
+- **No route-level `app/**/actions.ts`** — actions live in `lib/domain/actions/<table>.actions.ts`.
+
+| File | Exports |
+|------|---------|
+| `auth.actions.ts` | `signInAction`, `signUpAction`, `signOutAction` |
+| `users.actions.ts` | `deleteUserAction` |
+
+### `lib/domain/services/` — orchestration
+
+- Compose use cases; no `"use server"`.
+- **Pages and proxy import services for reads.**
+- **Actions import services for writes.**
+
+| File | Reads | Writes |
+|------|-------|--------|
+| `auth.service.ts` | `getSession`, `getSessionFromHeaders` | `signIn`, `signUp`, `signOut` |
+| `users.service.ts` | `getUsers`, `getTeacherUsers` | `deleteUser` |
+
+### `lib/domain/usecases/` — one operation per file
+
+- DB access via `@/database` and `@/database/schema`.
+- Auth use cases call `auth.api.*` from `@/auth` (Better Auth).
+- Reads use `"use cache"`, `cacheLife`, `cacheTag`.
+- Writes call `updateTag("<table>")` after mutations.
+
+### `lib/entities/` — shared types
+
+- Types inferred from Drizzle exports (`UserSelect`, etc.).
+- Result wrappers: `AuthResult`, `UserResult`.
+- Constants: `USER_ROLE`.
+
+---
+
+## Auth
+
+### Better Auth (`auth.ts`)
+
+- Drizzle adapter wired to `database/schema.ts` (`user`, `session`, `account`, `verification`).
+- Email/password enabled.
+- `nextCookies()` plugin sets session cookies on the server.
+
+### Environment
+
+| Variable | Purpose |
+|----------|---------|
+| `DATABASE_URL` | MySQL connection string (use a dedicated app DB, e.g. `rnd_template`) |
+| `BETTER_AUTH_SECRET` | Signing secret |
+| `BETTER_AUTH_URL` | Base URL (e.g. `http://localhost:3000`) |
+
+### Route protection (`proxy.ts`)
+
+- Reads session via `getSessionFromHeaders()` from `auth.service`.
+- Public paths: `/sign-in`, `/sign-up`, `/api/auth`.
+- Unauthenticated → redirect to `/sign-in?callbackURL=...`.
+- Authenticated on auth pages → redirect to `/`.
+
+### Auth UI
+
+| Route | Component | Pattern |
+|-------|-----------|---------|
+| `/sign-in` | `SignInForm` | Server form → `signInAction` |
+| `/sign-up` | `SignUpForm` | Server form → `signUpAction` |
+| `/` | Home | `signOutAction` when session exists |
+
+No client-side auth SDK. All auth goes through server actions and `auth.api` in use cases.
+
+---
+
+## Next.js frontend structure (`app/` + `components/`)
 
 ### `app/` — App Router
 
 | Path | Responsibility |
 |------|----------------|
 | `app/layout.tsx` | Root layout: fonts (Geist), `globals.css`, HTML shell |
-| `app/page.tsx` | Home route |
-| `app/users/page.tsx` | Users listing: composes `UsersTable`, loads data via controller factory |
-| `app/actions.ts` | **`"use server"`** — wires `UsersController` + `UsersService` + `GetUsersUseCase` (composition root for server-side domain access) |
+| `app/page.tsx` | Home; session display; links to users; `signOutAction` form |
+| `app/sign-in/page.tsx` | Suspense wrapper → `SignInForm` organism |
+| `app/sign-up/page.tsx` | Suspense wrapper → `SignUpForm` organism |
+| `app/users/page.tsx` | `getUsers()` from service → `UsersTable` |
+| `app/users/teachers/page.tsx` | `getTeacherUsers()` from service → `UsersTable` |
 | `app/globals.css` | Global styles (Tailwind entry) |
 
-**Pattern:** Server Components fetch or call server actions / controllers; interactive UI is pushed into client components under `components/`.
+**Pattern:** Server Components call **services** for data. Interactive UI lives in client components under `components/`. Mutations go through **actions** (server) or **UI hooks** (client handlers that call actions).
 
 ### `components/` — Atomic design
 
-The UI is grouped by **atoms → molecules → organisms** (Brad Frost–style). Co-located hooks use a **`<name>.<layer>.hooks.ts`** naming pattern next to the component.
+Brad Frost–style layers. **Every component folder co-locates a hooks file:**
 
-| Layer | Path | Example |
-|-------|------|---------|
-| **Atoms** | `components/atoms/` | `Button.tsx` — small, reusable controls |
-| **Molecules** | `components/molecules/<Name>/` | `UserCard/UserCard.tsx` + `userCard.molecules.hooks.ts` |
-| **Organisms** | `components/organisms/<Name>/` | `UsersTable/UsersTable.tsx` + `usersTable.organism.hooks.ts` |
+```
+components/atoms/Button/
+  Button.tsx
+  button.hooks.ts
 
-**Conventions observed:**
+components/molecules/UserCard/
+  UserCard.tsx
+  userCard.hooks.ts
 
-- **Client boundaries:** Organisms that need hooks/events use `"use client"` (e.g. `UsersTable`).
-- **Data from server:** Pages pass serializable props (e.g. `UserSelect[]`) into client organisms.
-- **Imports:** UI imports entity types from `@/lib/entities/...` for props typing shared with the domain layer.
+components/organisms/UsersTable/
+  UsersTable.tsx
+  usersTable.hooks.ts
+```
+
+**Naming:** `<camelCaseComponentName>.hooks.ts` in the **same folder** as the component. No layer suffix in the filename — the folder path (`atoms/`, `molecules/`, `organisms/`) already indicates the layer.
+
+| Layer | Path | Examples |
+|-------|------|----------|
+| **Atoms** | `components/atoms/<Name>/` | `Button/`, `Label/`, `Input/` |
+| **Molecules** | `components/molecules/<Name>/` | `UserCard/`, `LabelInput/` |
+| **Organisms** | `components/organisms/<Name>/` | `UsersTable/`, `SignInForm/`, `SignUpForm/`, `AuthShell/` |
+
+### Actions vs UI hooks
+
+| Concern | Location | Role |
+|---------|----------|------|
+| **Server mutations** | `lib/domain/actions/*.actions.ts` | `"use server"`; parse FormData; redirect |
+| **UI mutation handlers** | `<component>.hooks.ts` next to the component | `handleDelete`, `handleRefresh`; call server actions from client |
+
+**Server forms** (auth): field configs in organism hooks → render `LabelInput` molecules → `action={signInAction}` on `<form>`.
+
+**Client components** (delete user): `UserCard.tsx` calls `handleDelete` from `userCard.hooks.ts`, which builds `FormData` and invokes `deleteUserAction`.
+
+### Conventions
+
+- **Client boundaries:** Components that use React state/events or call UI mutation hooks use `"use client"` (e.g. `UsersTable`, `UserCard`).
+- **Data from server:** Pages pass serializable props into organisms.
+- **Imports:** UI types from `@/lib/entities/...`. UI must **not** import `database/` or use cases directly.
+- **Forms:** Use `LabelInput` molecule + `Button` atom. Field definitions live in organism hooks (`signInForm.hooks.ts` exports `fields: LabelInputField[]`).
 
 ---
 
-## Next.js 16 “backend” structure (`lib/` + `database/`)
+## Workflows — per `table_name`
 
-Server-side logic is **not** only under `lib/`: persistence lives in **`database/`** at the repo root, and **`app/actions.ts`** is the composition root that connects Next.js to the domain layer.
+Each database table gets its own vertical slice in `lib/`. Folder and file names match the **Drizzle table export** (e.g. `user` → `users.type.ts`, `users.service.ts`, `usecases/users/`). The **user** table (Better Auth) is the reference implementation.
 
-### `lib/` — Domain-oriented layers
+**Placeholder:** `<table_name>` = table export in `database/schema.ts` (e.g. `user`, `session`).
 
-| Path | Responsibility |
-|------|----------------|
-| `lib/entities/` | Domain types inferred from Drizzle schema (e.g. `users.type.ts` → `UserSelect`, `UserInsert`) |
-| `lib/domain/controllers/` | HTTP-agnostic “controllers”: orchestrate services, implement interfaces (e.g. `users/users.controller.ts`, `users.interface.ts`) |
-| `lib/domain/services/` | Application services delegating to use cases (e.g. `users.service.ts`) |
-| `lib/domain/usecases/` | Single-purpose operations (e.g. `users/get_users.usecase.ts` executes DB read via Drizzle) |
+### End-to-end overview
 
-**Request/data flow (users example):**
+```mermaid
+flowchart TB
+  subgraph ui ["UI (components/)"]
+    Atom["atoms/<Name>/"]
+    Molecule["molecules/<Name>/"]
+    Organism["organisms/<Name>/"]
+    Atom --> Molecule --> Organism
+  end
 
-1. **Route / action:** `createUsersController()` in `app/actions.ts` instantiates `UsersController` → `UsersService` → `GetUsersUseCase`.
-2. **Use case:** `GetUsersUseCase` uses `database` from `@/database` and the `users` table from `@/database/schema`.
-3. **Types:** `UserSelect` is exported from `lib/entities/users.type.ts` and used by controllers and React props.
+  subgraph app ["App Router (app/)"]
+    Page["app/<route>/page.tsx"]
+  end
 
-### `database/` — Infrastructure
+  subgraph domain ["Domain (lib/)"]
+    Actions["actions/<table>.actions.ts<br/>(mutations only)"]
+    Service["services/<table>.service.ts"]
+    UseCase["usecases/<table>/"]
+    Entity["entities/<table>.type.ts"]
+    Actions --> Service --> UseCase
+    Entity -.-> Service
+    Entity -.-> UseCase
+  end
 
-| File | Responsibility |
-|------|----------------|
-| `database/index.ts` | Drizzle client (`mysql2` connection via `DATABASE_URL`) |
-| `database/schema.ts` | Drizzle table definitions (e.g. `users` MySQL table) |
+  subgraph db ["Persistence"]
+    Schema["database/schema.ts"]
+    Client["database/index.ts"]
+    Schema --> Client
+  end
 
-**Configuration:** `drizzle.config.ts` points `schema` to `./database/schema.ts`, dialect **mysql**, migrations/output under `./drizzle`.
+  Page -->|"reads"| Service
+  Page -->|"props"| Organism
+  Organism -->|"UI hooks → actions"| Actions
+  UseCase --> Client
+  Entity -->|"infer types"| Schema
+```
+
+### 1. Add a new table (server data)
+
+```mermaid
+flowchart LR
+  A["1. database/schema.ts"] --> B["2. lib/entities/<table>.type.ts"]
+  B --> C["3. lib/domain/usecases/<table>/<action>.usecase.ts"]
+  C --> D["4. lib/domain/services/<table>.service.ts"]
+  D --> E["5. lib/domain/actions/<table>.actions.ts<br/>(mutations only)"]
+  E --> F["6. app/<route>/page.tsx"]
+```
+
+| Step | Path | What to do |
+|------|------|------------|
+| 1 | `database/schema.ts` | Add table. Run `npm run db:generate` + `npm run db:migrate`. |
+| 2 | `lib/entities/<table>.type.ts` | `$inferSelect`, `$inferInsert`, result types, constants. |
+| 3 | `lib/domain/usecases/<table>/` | One file per operation. Reads: `"use cache"`. Writes: `updateTag`. |
+| 4 | `lib/domain/services/<table>.service.ts` | Compose use cases. |
+| 5 | `lib/domain/actions/<table>.actions.ts` | `"use server"` mutation entry points (if writes exist). |
+| 6 | Consumer | Page imports **service** for reads; forms/hooks import **actions** for writes. |
+
+**Example (`user` table):**
+
+| Layer | Path |
+|-------|------|
+| Schema | `database/schema.ts` → `user`, `session`, `account`, `verification` |
+| Entity | `lib/entities/users.type.ts` |
+| Use cases | `get_users.usecase.ts`, `get_users_by_role.usecase.ts`, `delete_user.usecase.ts` |
+| Service | `lib/domain/services/users.service.ts` |
+| Actions | `lib/domain/actions/users.actions.ts` → `deleteUserAction` |
+| Pages | `app/users/page.tsx`, `app/users/teachers/page.tsx` |
+| UI | `UserCard` (delete), `UsersTable` (list) |
+
+### 2. Add UI for a table
+
+| Layer | Path pattern | Example |
+|-------|--------------|---------|
+| **Atom** | `components/atoms/<Name>/` | `Button/`, `Input/`, `Label/` |
+| **Molecule** | `components/molecules/<Name>/` | `UserCard/`, `LabelInput/` |
+| **Organism** | `components/organisms/<Name>/` | `UsersTable/`, `SignInForm/` |
+
+Each folder: `<Name>.tsx` + `<camelCaseName>.hooks.ts`.
+
+For **forms**: define `LabelInputField[]` in organism hooks; map to `<LabelInput />`; wire `action={...Action}` on `<form>`.
+
+For **client mutations**: implement `handleX` in molecule/organism hooks; call the server action inside.
+
+### 3. Add a page for a table
+
+| Step | Action |
+|------|--------|
+| 1 | Create `app/<route>/page.tsx` (Server Component). |
+| 2 | Import read function from `@/lib/domain/services/<table>.service`. |
+| 3 | `await` the service in the page. |
+| 4 | Render organism with typed props. |
+| 5 | Pass `error` from `searchParams` when actions redirect with `?error=`. |
+
+### 4. HTTP API route (optional)
+
+Route handlers may import **services** (reads) or **actions** / services (writes). Never query `database` directly in `route.ts`.
+
+### Quick reference checklist
+
+| Step | Path |
+|------|------|
+| Define table | `database/schema.ts` |
+| Types | `lib/entities/<table>.type.ts` |
+| DB operations | `lib/domain/usecases/<table>/<action>.usecase.ts` |
+| Orchestration | `lib/domain/services/<table>.service.ts` |
+| Mutations | `lib/domain/actions/<table>.actions.ts` |
+| Screen | `app/<route>/page.tsx` (reads via service) |
+| Row/card UI | `components/molecules/<Name>/` |
+| List/form UI | `components/organisms/<Name>/` |
+| Shared controls | `components/atoms/<Name>/` |
 
 ---
 
 ## Full code samples by folder
 
-Each block below is the **complete** current source of the listed file (faithful copy). **Not inlined:** `public/*.svg` (static assets; open files in `public/`), and lockfiles / `.next` build output.
+Representative current sources. Static assets in `public/` are omitted.
 
-### `app/`
-
-#### `app/actions.ts`
-
-```ts
-"use server";
-
-import { UsersController } from "@/lib/domain/controllers/users/users.controller";
-import { GetUsersUseCase } from "@/lib/domain/usecases/users/get_users.usecase";
-import { UsersService } from "@/lib/domain/services/users.service";
-
-export async function createUsersController(): Promise<UsersController> {
-
-  return new UsersController(new UsersService(
-    new GetUsersUseCase())
-
-  );
-}
-```
-
-#### `app/layout.tsx`
+### `app/users/page.tsx`
 
 ```tsx
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
-import "./globals.css";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-export const metadata: Metadata = {
-  title: "Create Next App",
-  description: "Generated by create next app",
-};
-
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
-  return (
-    <html
-      lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
-    >
-      <body className="min-h-full flex flex-col">{children}</body>
-    </html>
-  );
-}
-```
-
-#### `app/page.tsx`
-
-```tsx
-import Link from "next/link";
-
-export default function Home() {
-  return (
-    <div className="flex flex-col flex-1 items-center justify-center min-h-screen bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-center py-32 px-16 text-center">
-        <h1 className="text-5xl font-bold tracking-tight text-black dark:text-white mb-6">
-          RND NextJS Template
-        </h1>
-        <p className="max-w-md text-lg text-zinc-600 dark:text-zinc-400 mb-8">
-          Welcome to the Livro Systems Inc. Next.js template. Built with Atomic Design and Drizzle ORM.
-        </p>
-        <div className="flex gap-4">
-          <Link
-            href="/users"
-            className="px-6 py-3 rounded-full bg-black text-white dark:bg-white dark:text-black font-medium hover:opacity-90 transition-opacity"
-          >
-            View Users
-          </Link>
-        </div>
-      </main>
-    </div>
-  );
-}
-```
-
-#### `app/globals.css`
-
-```css
-@import "tailwindcss";
-
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
-}
-```
-
-#### `app/users/page.tsx`
-
-```tsx
-import { createUsersController } from "../actions";
+import { getUsers } from "@/lib/domain/services/users.service";
 import { UsersTable } from "@/components/organisms/UsersTable/UsersTable";
 
-export default async function UsersPage() {
-  const usersController = await createUsersController();
-  const users = await usersController.getUsers();
+type UsersPageProps = {
+  searchParams: Promise<{ error?: string }>;
+};
+
+export default async function UsersPage({ searchParams }: UsersPageProps) {
+  const users = await getUsers();
+  const params = await searchParams;
+
   return (
     <main className="max-w-4xl mx-auto py-12 px-6">
-      <div className="flex items-center justify-between mb-8">
-        <h1 className="text-3xl font-bold">Users</h1>
-      </div>
-      <UsersTable users={users} />
+      <h1 className="text-3xl font-bold mb-8">Users</h1>
+      <UsersTable users={users} redirectTo="/users" error={params.error} />
     </main>
   );
 }
 ```
 
----
-
-### `components/`
-
-#### `components/atoms/Button.tsx`
+### `components/atoms/Button/Button.tsx`
 
 ```tsx
 import React from "react";
+import { useButtonStyles } from "./button.hooks";
 
 interface Props {
   children: React.ReactNode;
   variant?: "primary" | "secondary" | "danger" | "success";
+  type?: "button" | "submit" | "reset";
+  className?: string;
   onClick?: () => void;
   disabled?: boolean;
 }
@@ -290,43 +417,91 @@ interface Props {
 export const Button: React.FC<Props> = ({
   children,
   variant = "primary",
+  type = "button",
+  className,
   onClick,
   disabled,
 }) => {
-  const baseStyle = "px-4 py-2 rounded-md";
-  const variantStyle = {
-    primary: "bg-blue-500 text-white",
-    secondary: "bg-gray-500 text-white",
-    danger: "bg-red-500 text-white",
-    success: "bg-green-500 text-white",
-  };
+  const styles = [useButtonStyles(variant), className].filter(Boolean).join(" ");
   return (
-    <button
-      className={`${baseStyle} ${variantStyle[variant]}`}
-      onClick={onClick}
-      disabled={disabled}
-    >
+    <button type={type} className={styles} onClick={onClick} disabled={disabled}>
       {children}
     </button>
   );
 };
 ```
 
-#### `components/molecules/UserCard/UserCard.tsx`
+### `components/molecules/LabelInput/LabelInput.tsx`
+
+```tsx
+import { Label } from "@/components/atoms/Label/Label";
+import { Input } from "@/components/atoms/Input/Input";
+import { useLabelInputStyles, type LabelInputField } from "./labelInput.hooks";
+
+type LabelInputProps = LabelInputField;
+
+export function LabelInput({
+  label,
+  name,
+  type = "text",
+  placeholder,
+  autoComplete,
+  required,
+  minLength,
+}: LabelInputProps) {
+  const className = useLabelInputStyles();
+
+  return (
+    <label className={className} htmlFor={name}>
+      <Label>{label}</Label>
+      <Input
+        id={name}
+        name={name}
+        type={type}
+        placeholder={placeholder}
+        autoComplete={autoComplete}
+        required={required}
+        minLength={minLength}
+      />
+    </label>
+  );
+}
+```
+
+### `components/molecules/UserCard/userCard.hooks.ts`
+
+```ts
+import { deleteUserAction } from "@/lib/domain/actions/users.actions";
+
+export const useUserCard = (redirectTo = "/users") => {
+  const handleDelete = async (id: string) => {
+    const formData = new FormData();
+    formData.set("id", id);
+    formData.set("redirectTo", redirectTo);
+    await deleteUserAction(formData);
+  };
+
+  return { handleDelete };
+};
+```
+
+### `components/molecules/UserCard/UserCard.tsx`
 
 ```tsx
 "use client";
 
-import { Button } from "../../atoms/Button";
-import { useUserCard } from "./userCard.molecules.hooks";
-import { UserSelect } from "@/lib/entities/users.type";
+import { Button } from "@/components/atoms/Button/Button";
+import { useUserCard } from "./userCard.hooks";
+import type { UserSelect } from "@/lib/entities/users.type";
 
 interface UserCardProps {
   user: UserSelect;
+  redirectTo?: string;
 }
 
-export const UserCard = ({ user }: UserCardProps) => {
-  const { handleDelete } = useUserCard();
+export const UserCard = ({ user, redirectTo = "/users" }: UserCardProps) => {
+  const { handleDelete } = useUserCard(redirectTo);
+
   return (
     <div className="flex justify-between items-center p-4 border rounded-lg shadow-sm bg-white dark:bg-zinc-900 dark:border-zinc-800">
       <div>
@@ -341,405 +516,225 @@ export const UserCard = ({ user }: UserCardProps) => {
 };
 ```
 
-#### `components/molecules/UserCard/userCard.molecules.hooks.ts`
-
-```ts
-export const useUserCard = () => {
-  const handleDelete = (id: string) => {
-    console.log(`User ${id} deleted`);
-  };
-
-  return {
-    handleDelete,
-  };
-};
-  
-```
-
-#### `components/organisms/UsersTable/UsersTable.tsx`
+### `components/organisms/SignInForm/sign-in-form.tsx`
 
 ```tsx
-"use client";
-import { UserSelect } from "@/lib/entities/users.type";
-import { UserCard } from "@/components/molecules/UserCard/UserCard";
-import { useUsersTable } from "./usersTable.organism.hooks";
-import { Button } from "@/components/atoms/Button";
+import { redirect } from "next/navigation";
+import { signInAction } from "@/lib/domain/actions/auth.actions";
+import { getSession } from "@/lib/domain/services/auth.service";
+import { AuthShell } from "@/components/organisms/AuthShell/AuthShell";
+import { LabelInput } from "@/components/molecules/LabelInput/LabelInput";
+import { Button } from "@/components/atoms/Button/Button";
+import { useAuthFormSubmitStyles } from "@/components/atoms/Button/button.hooks";
+import { getSignInFormState } from "./signInForm.hooks";
 
-interface UsersTableProps {
-  users: UserSelect[];
-  fallbackText?: string;
-}
+export async function SignInForm({ searchParams }: { searchParams: Promise<{ error?: string; callbackURL?: string }> }) {
+  const session = await getSession();
+  const params = await searchParams;
+  if (session) redirect(params.callbackURL || "/");
 
-export const UsersTable = ({ users }: UsersTableProps) => {
-  const { usersData, handleRefresh } = useUsersTable({ users });
+  const { callbackURL, error, fields } = getSignInFormState(params);
+  const submitClassName = useAuthFormSubmitStyles();
 
   return (
-    <div>
-      <div className="mb-4">
-        <Button onClick={handleRefresh}>Refresh</Button>
-      </div>
-      <div className="grid gap-4">
-        {usersData.map((userData: UserSelect) => (
-          <UserCard key={userData.id} user={userData} />
+    <AuthShell title="Sign in" description="Use your email and password to continue.">
+      {error ? <p className="mb-6 ...">{error}</p> : null}
+      <form action={signInAction} className="space-y-5">
+        <input type="hidden" name="callbackURL" value={callbackURL} />
+        {fields.map((field) => (
+          <LabelInput key={field.name} {...field} />
         ))}
-      </div>{" "}
-    </div>
+        <Button type="submit" className={submitClassName}>Sign in</Button>
+      </form>
+    </AuthShell>
   );
-};
-```
-
-#### `components/organisms/UsersTable/usersTable.organism.hooks.ts`
-
-```ts
-import { UserSelect } from "@/lib/entities/users.type";
-import { useEffect, useState } from "react";
-
-interface UsersTableProps {
-  users: UserSelect[];
-}
-
-export const useUsersTable = ({ users }: UsersTableProps) => {
-  const [usersData, setUsersData] = useState<UserSelect[]>(users);
-
-  useEffect(() => {
-    setUsersData(users);
-    handleNoUsersFound(users);
-  }, []);
-
-  const handleNoUsersFound = (users: UserSelect[]) => {
-    if (users.length === 0) {
-      setUsersData([
-        {
-          name: "Hervey",
-          email: "[EMAIL_ADDRESS]",
-          id: "1",
-        },
-        {
-          name: "Marquez",
-          email: "[EMAIL_ADDRESS]",
-          id: "2",
-        },
-        {
-          name: "Test",
-          email: "[EMAIL_ADDRESS]",
-          id: "3",
-        },
-        {
-          name: "T1",
-          email: "[EMAIL_ADDRESS]",
-          id: "4",
-        },
-        {
-          name: "T2",
-          email: "[EMAIL_ADDRESS]",
-          id: "5",
-        },
-        {
-          name: "T3",
-          email: "[EMAIL_ADDRESS]",
-          id: "6",
-        },
-        {
-          name: "T4",
-          email: "[EMAIL_ADDRESS]",
-          id: "7",
-        },
-        {
-          name: "T5",
-          email: "[EMAIL_ADDRESS]",
-          id: "8",
-        },
-        {
-          name: "T6",
-          email: "[EMAIL_ADDRESS]",
-          id: "9",
-        },
-        {
-          name: "T7",
-          email: "[EMAIL_ADDRESS]",
-          id: "10",
-        },
-      ]);
-    }
-  };
-  const handleRefresh = () => {
-    console.log("refresh");
-  };
-  return { usersData, handleRefresh, handleNoUsersFound };
-};
-```
-
----
-
-### `lib/`
-
-#### `lib/entities/users.type.ts`
-
-```ts
-import { users } from "@/database/schema";
-
-export type UserSelect = typeof users.$inferSelect;
-export type UserInsert = typeof users.$inferInsert;
-```
-
-#### `lib/domain/controllers/users/users.interface.ts`
-
-```ts
-import { UserSelect } from "@/lib/entities/users.type";
-
-export interface IUsersController {
-  getUsers(): Promise<UserSelect[]>;
 }
 ```
 
-#### `lib/domain/controllers/users/users.controller.ts`
+### `lib/domain/actions/users.actions.ts`
 
 ```ts
+"use server";
 
-import { UserSelect } from "@/lib/entities/users.type";
-import { IUsersController } from "./users.interface";
-import { UsersService } from "@/lib/domain/services/users.service";
+import { redirect } from "next/navigation";
+import { deleteUser } from "@/lib/domain/services/users.service";
 
-export class UsersController implements IUsersController {
-  constructor(private readonly usersService: UsersService) { }
+export async function deleteUserAction(formData: FormData) {
+  const id = String(formData.get("id") ?? "").trim();
+  const redirectTo = String(formData.get("redirectTo") ?? "").trim() || "/users";
 
-  async getUsers(): Promise<UserSelect[]> {
-    try {
-      const result = await this.usersService.getUsers();
-      return result;
-    } catch (error) {
-      console.error(error);
-      throw error;
-    }
+  if (!id) {
+    redirect(`${redirectTo}?error=${encodeURIComponent("User id is required")}`);
   }
-}
-```
 
-#### `lib/domain/services/users.service.ts`
-
-```ts
-import { GetUsersUseCase } from "../usecases/users/get_users.usecase";
-
-export class UsersService {
-  constructor(private readonly getUsersUseCase: GetUsersUseCase) {}
-
-  async getUsers() {
-    return await this.getUsersUseCase.execute();
+  const result = await deleteUser({ id });
+  if (!result.ok) {
+    redirect(`${redirectTo}?error=${encodeURIComponent(result.error)}`);
   }
+  redirect(redirectTo);
 }
 ```
 
-#### `lib/domain/usecases/users/get_users.usecase.ts`
+### `lib/domain/services/users.service.ts`
 
 ```ts
+import { getUsers as getUsersUseCase } from "../usecases/users/get_users.usecase";
+import { getUsersByRole } from "../usecases/users/get_users_by_role.usecase";
+import { deleteUser as deleteUserUseCase } from "../usecases/users/delete_user.usecase";
+import { USER_ROLE, type DeleteUserInput, type UserResult, type UserSelect } from "@/lib/entities/users.type";
+
+export async function getUsers(): Promise<UserSelect[]> {
+  return getUsersUseCase();
+}
+
+export async function getTeacherUsers(): Promise<UserSelect[]> {
+  return getUsersByRole(USER_ROLE.TEACHER);
+}
+
+export async function deleteUser(input: DeleteUserInput): Promise<UserResult> {
+  return deleteUserUseCase(input);
+}
+```
+
+### `lib/domain/usecases/users/delete_user.usecase.ts`
+
+```ts
+import { eq } from "drizzle-orm";
+import { updateTag } from "next/cache";
 import { database } from "@/database";
-import { UserSelect } from "@/lib/entities/users.type";
-import { users } from "@/database/schema";
+import { user } from "@/database/schema";
+import type { DeleteUserInput, UserResult } from "@/lib/entities/users.type";
 
-export class GetUsersUseCase {
-  private db = database;
-  async execute(): Promise<UserSelect[]> {
-    try {
-      const result = await this.db.select().from(users);
-      return result;
-    } catch (error) {
-      console.error(error);
-      return [];
-    }
+export async function deleteUser(input: DeleteUserInput): Promise<UserResult> {
+  try {
+    await database.delete(user).where(eq(user.id, input.id));
+    updateTag("users");
+    return { ok: true, data: undefined };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : "Failed to delete user." };
   }
 }
 ```
 
----
+### `lib/entities/users.type.ts`
 
-### `database/`
+```ts
+import { user } from "@/database/schema";
 
-#### `database/index.ts`
+export type UserSelect = typeof user.$inferSelect;
+export type UserInsert = typeof user.$inferInsert;
+
+export const USER_ROLE = {
+  TEACHER: "teacher",
+  STUDENT: "student",
+  ADMIN: "admin",
+} as const;
+
+export type UserRole = (typeof USER_ROLE)[keyof typeof USER_ROLE];
+
+export type UserResult<T = void> =
+  | { ok: true; data: T }
+  | { ok: false; error: string };
+
+export type DeleteUserInput = { id: string };
+```
+
+### `database/index.ts`
 
 ```ts
 import "dotenv/config";
 import { drizzle } from "drizzle-orm/mysql2";
+import mysql from "mysql2/promise";
 
-export const database = drizzle({
-  connection: { uri: process.env.DATABASE_URL },
+const pool = mysql.createPool({
+  uri: process.env.DATABASE_URL,
+  connectionLimit: 10,
+  enableKeepAlive: true,
 });
 
-
+export const database = drizzle(pool);
 ```
 
-#### `database/schema.ts`
+### `database/schema.ts` (Better Auth tables — excerpt)
 
 ```ts
-import { mysqlTable, varchar } from "drizzle-orm/mysql-core";
-
-export const users = mysqlTable("users", {
-  id: varchar("id", { length: 255 }).primaryKey(),
+export const user = mysqlTable("user", {
+  id: varchar("id", { length: 36 }).primaryKey(),
   name: varchar("name", { length: 255 }).notNull(),
-  email: varchar("email", { length: 255 }).notNull(),
+  email: varchar("email", { length: 255 }).notNull().unique(),
+  emailVerified: boolean("email_verified").default(false).notNull(),
+  image: text("image"),
+  createdAt: timestamp("created_at", { fsp: 3 }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { fsp: 3 }).defaultNow().$onUpdate(() => new Date()).notNull(),
 });
+
+// session, account, verification — see database/schema.ts
 ```
 
----
-
-### Project configuration (repository root)
-
-#### `next.config.ts`
+### `proxy.ts`
 
 ```ts
-import type { NextConfig } from "next";
+import { NextRequest, NextResponse } from "next/server";
+import { getSessionFromHeaders } from "@/lib/domain/services/auth.service";
 
-const nextConfig: NextConfig = {
-  /* config options here */
-};
+export async function proxy(request: NextRequest) {
+  const { pathname } = request.nextUrl;
+  if (pathname.startsWith("/api/auth")) return NextResponse.next();
 
-export default nextConfig;
+  const session = await getSessionFromHeaders(request.headers);
+  const publicPaths = ["/sign-in", "/sign-up"];
+
+  if (session && publicPaths.includes(pathname)) {
+    return NextResponse.redirect(new URL("/", request.url));
+  }
+  if (!session && !publicPaths.includes(pathname)) {
+    const signInUrl = new URL("/sign-in", request.url);
+    signInUrl.searchParams.set("callbackURL", pathname);
+    return NextResponse.redirect(signInUrl);
+  }
+  return NextResponse.next();
+}
 ```
 
-#### `drizzle.config.ts`
-
-```ts
-import { defineConfig } from "drizzle-kit";
-export default defineConfig({
-  out: "./drizzle",
-  schema: "./database/schema.ts",
-  dialect: "mysql",
-  dbCredentials: {
-    url: process.env.DATABASE_URL!,
-  },
-});
-```
-
-#### `postcss.config.mjs`
-
-```js
-const config = {
-  plugins: {
-    "@tailwindcss/postcss": {},
-  },
-};
-
-export default config;
-```
-
-#### `eslint.config.mjs`
-
-```js
-import { defineConfig, globalIgnores } from "eslint/config";
-import nextVitals from "eslint-config-next/core-web-vitals";
-import nextTs from "eslint-config-next/typescript";
-
-const eslintConfig = defineConfig([
-  ...nextVitals,
-  ...nextTs,
-  // Override default ignores of eslint-config-next.
-  globalIgnores([
-    // Default ignores of eslint-config-next:
-    ".next/**",
-    "out/**",
-    "build/**",
-    "next-env.d.ts",
-  ]),
-]);
-
-export default eslintConfig;
-```
-
-#### `package.json`
+### `package.json` (scripts + auth dependency)
 
 ```json
 {
-  "name": "rnd-nextjs-template",
-  "version": "0.1.0",
-  "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "bun scripts/migrate.mts",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
-    "dotenv": "^17.4.2",
+    "better-auth": "^1.6.23",
     "drizzle-orm": "^0.45.2",
-    "mysql2": "^3.22.2",
+    "mysql2": "^3.22.5",
     "next": "16.2.4",
     "react": "19.2.4",
     "react-dom": "19.2.4"
-  },
-  "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "drizzle-kit": "^0.31.10",
-    "eslint": "^9",
-    "eslint-config-next": "16.2.4",
-    "tailwindcss": "^4",
-    "typescript": "^5"
-  },
-  "ignoreScripts": [
-    "sharp",
-    "unrs-resolver"
-  ],
-  "trustedDependencies": [
-    "sharp",
-    "unrs-resolver"
-  ]
+  }
 }
 ```
-
-#### `tsconfig.json`
-
-```json
-{
-  "compilerOptions": {
-    "target": "ES2017",
-    "lib": ["dom", "dom.iterable", "esnext"],
-    "allowJs": true,
-    "skipLibCheck": true,
-    "strict": true,
-    "noEmit": true,
-    "esModuleInterop": true,
-    "module": "esnext",
-    "moduleResolution": "bundler",
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "jsx": "react-jsx",
-    "incremental": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
-    "paths": {
-      "@/*": ["./*"]
-    }
-  },
-  "include": [
-    "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
-    ".next/types/**/*.ts",
-    ".next/dev/types/**/*.ts",
-    "**/*.mts"
-  ],
-  "exclude": ["node_modules"]
-}
-```
-
-### `public/`
-
-Static assets (not duplicated here): `file.svg`, `globe.svg`, `next.svg`, `vercel.svg`, `window.svg`. See the `public/` directory in the repository.
 
 ---
 
 ## Cross-cutting concerns
 
-- **Environment:** `DATABASE_URL` is required for DB connectivity (see `database/index.ts`, `drizzle.config.ts`).
-- **Path alias:** `@/` maps to the project root for imports across `app`, `components`, `lib`, and `database`.
-- **Separation:** UI (`components/`) depends on **types** from `lib/entities`; **data access** stays in use cases + `database/`; **Next.js entry** for DI-style wiring is `app/actions.ts`.
+- **Environment:** `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` required for auth and DB.
+- **Path alias:** `@/` maps to the project root.
+- **Separation:** UI depends on **entity types** only. Data access stays in use cases. **Reads** enter via services; **writes** enter via actions.
+- **Hooks vs actions:** Server mutations live in `lib/domain/actions/`. UI-side handlers live in co-located `<name>.hooks.ts` next to the component.
+- **Caching:** Use cases use `"use cache"`, `cacheLife("hours")`, `cacheTag("users")`. Mutations call `updateTag("users")`.
+- **No client auth SDK:** Forms and hooks invoke server actions; use cases call `auth.api.*`.
+- **Suspense:** Auth pages wrap async organisms in `<Suspense>` for `searchParams` / session reads.
 
 ---
 
 ## Version reference
 
-Versions stated here match **`package.json`** at the time this document was written. After upgrades, reconcile this file with `package.json` if you rely on it for audits or onboarding.
+Versions match **`package.json`** at the time this document was written. Reconcile after upgrades.

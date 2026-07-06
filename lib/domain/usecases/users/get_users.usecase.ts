@@ -1,7 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 import { database } from "@/database";
 import type { UserSelect } from "@/lib/entities/users.type";
-import { users } from "@/database/schema";
+import { user } from "@/database/schema";
 
 export async function getUsers(): Promise<UserSelect[]> {
   "use cache";
@@ -9,7 +9,7 @@ export async function getUsers(): Promise<UserSelect[]> {
   cacheTag("users");
 
   try {
-    return await database.select().from(users);
+    return await database.select().from(user);
   } catch (error) {
     console.error(error);
     return [];
