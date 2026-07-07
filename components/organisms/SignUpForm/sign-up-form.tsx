@@ -25,7 +25,7 @@ export async function SignUpForm({ searchParams }: SignUpFormProps) {
   return (
     <AuthShell title="Create account" description="Sign up with email and password.">
       {error ? (
-        <p className="mb-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+        <p className="mb-6 rounded-xl bg-secondary-container px-4 py-3 text-sm text-secondary">
           {error}
         </p>
       ) : null}
@@ -42,9 +42,9 @@ export async function SignUpForm({ searchParams }: SignUpFormProps) {
         </Button>
       </form>
 
-      <p className="mt-6 text-center text-sm text-zinc-600 dark:text-zinc-400">
+      <p className="mt-6 text-center text-sm text-on-surface-muted">
         Already have an account?{" "}
-        <a href="/sign-in" className="font-medium text-black underline dark:text-white">
+        <a href="/sign-in" className="font-medium text-primary underline">
           Sign in
         </a>
       </p>

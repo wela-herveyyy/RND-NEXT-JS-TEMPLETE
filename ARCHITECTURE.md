@@ -31,6 +31,10 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
   - [`components/` — Atomic design](#components--atomic-design)
   - [Actions vs UI hooks](#actions-vs-ui-hooks)
   - [Conventions](#conventions)
+- [PWA (Progressive Web App)](#pwa-progressive-web-app)
+- [Local storage (IndexedDB + Storage API)](#local-storage-indexeddb--storage-api)
+- [Design system](#design-system)
+- [Local development — Docker MySQL](#local-development--docker-mysql)
 - [Workflows — per `table_name`](#workflows--per-table_name)
   - [End-to-end overview](#end-to-end-overview)
   - [1. Add a new table (server data)](#1-add-a-new-table-server-data)
@@ -56,6 +60,8 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
 | Database access | **Drizzle ORM** (`0.45.2`) | Schema in `database/schema.ts`; MySQL dialect |
 | DB driver | **mysql2** (`3.22.5`) | Connection pool in `database/index.ts` |
 | Env | **dotenv** (`^17.4.2`) | Loaded in `database/index.ts` for local credentials |
+| UI fonts | **Manrope** (display) + **Inter** (body) | Loaded in `app/layout.tsx`; tokens in `app/globals.css` |
+| UI theme | Light-only design tokens | Teal/ochre palette — see [DESIGN.MD](./DESIGN.MD) |
 | Linting | **ESLint 9** + **eslint-config-next** (`16.2.4`) | Aligned with Next.js major version |
 
 ---
@@ -73,6 +79,7 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
 | `drizzle-orm` | `^0.45.2` | Type-safe SQL / schema; used in use cases |
 | `mysql2` | `^3.22.5` | MySQL connection pool for Drizzle |
 | `dotenv` | `^17.4.2` | Loads `DATABASE_URL` (and similar) for DB bootstrap |
+| `web-push` | `^3.6.7` | Web Push API for PWA notifications (optional) |
 
 ### Development (`devDependencies`)
 
@@ -93,7 +100,7 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
 | Script | Command | Purpose |
 |--------|---------|---------|
 | `db:generate` | `drizzle-kit generate` | Generate migration SQL from schema changes |
-| `db:migrate` | `bun scripts/migrate.mts` | Run migrations programmatically (shows errors clearly) |
+| `db:migrate` | `npx tsx scripts/migrate.mts` | Run migrations programmatically (shows errors clearly) |
 | `db:push` | `drizzle-kit push` | Push schema directly (dev only) |
 | `db:studio` | `drizzle-kit studio` | Open Drizzle Studio |
 
@@ -112,10 +119,15 @@ rnd-nextjs-template/
 │   │   └── usecases/       # Single-purpose DB / auth operations
 │   └── entities/           # Domain types inferred from schema
 ├── database/               # Drizzle client + schema
+├── public/
+│   ├── icon.svg            # PWA icon
+│   └── sw.js               # Service worker (push notifications)
+├── docker-compose.yml      # MySQL (drizzle-mysql) on host port 3307
 ├── auth.ts                 # Better Auth config (Drizzle adapter + nextCookies)
 ├── proxy.ts                # Route protection (session guard)
 ├── scripts/
 │   └── migrate.mts         # Programmatic migration runner
+├── drizzle/                # Generated migration SQL
 ├── drizzle.config.ts
 ├── next.config.ts
 ├── package.json
@@ -249,6 +261,8 @@ flowchart LR
 |------|---------|
 | `auth.actions.ts` | `signInAction`, `signUpAction`, `signOutAction` |
 | `users.actions.ts` | `getUsersAction`, `getDevUsersAction`, `deleteUserAction` |
+| `push.actions.ts` | `subscribeUser`, `unsubscribeUser`, `sendNotification` (PWA demo; no AAA) |
+| `storage.actions.ts` | `getStorageEstimateAction`, `requestPersistentStorageAction`, `saveLocalRecordAction`, etc. (browser-only; no AAA) |
 
 ### `lib/domain/services/` — orchestration
 
@@ -261,11 +275,13 @@ flowchart LR
 |------|---------|---------|
 | `auth.service.ts` | actions, proxy, auth UI | `getSession`, `getSessionFromHeaders`, `auth`, `signIn`, `signUp`, `signOut` |
 | `users.service.ts` | `users.actions.ts` | `getUsers`, `getDevUsers`, `deleteUser` |
+| `storage.service.ts` | `storagePanel.hooks.ts` | `getStorageEstimate`, `requestPersistentStorage`, `saveLocalRecord`, `listLocalRecords`, `deleteLocalRecord` |
 
 ### `lib/domain/usecases/` — one operation per file
 
 - DB access via `@/database` and `@/database/schema`.
 - Auth use cases call `auth.api.*` from `@/auth` (Better Auth).
+- **Storage use cases** run in the browser only (IndexedDB + `navigator.storage`) — no `"use cache"`.
 - Reads use `"use cache"`, `cacheLife`, `cacheTag`.
 - Writes call `updateTag("<table>")` after mutations.
 
@@ -275,6 +291,7 @@ flowchart LR
 |------|----------|
 | `users.type.ts` | `UserSelect`, `UserInsert`, `USER_ROLE`, `USER_PERMISSION`, `ROLE_PERMISSIONS`, `hasPermission()`, `UserResult` |
 | `auth.type.ts` | `AuthUser`, `AuthSession`, `ActionSession`, `ActionLogEntry`, `AuthResult`, sign-in/up inputs |
+| `storage.type.ts` | `StorageResult`, `StorageEstimate`, `LocalRecord`, `formatBytes()`, IDB constants |
 
 Types are inferred from Drizzle exports where applicable. Permission checks live in entity files, not in actions.
 
@@ -292,16 +309,19 @@ Types are inferred from Drizzle exports where applicable. Permission checks live
 
 | Variable | Purpose |
 |----------|---------|
-| `DATABASE_URL` | MySQL connection string (use a dedicated app DB, e.g. `rnd_template`) |
+| `DATABASE_URL` | MySQL connection string (Docker default: `mysql://root:123@127.0.0.1:3307/rnd_template`) |
 | `BETTER_AUTH_SECRET` | Signing secret |
 | `BETTER_AUTH_URL` | Base URL (e.g. `http://localhost:3000`) |
+| `NEXT_PUBLIC_VAPID_PUBLIC_KEY` | PWA push — public VAPID key |
+| `VAPID_PRIVATE_KEY` | PWA push — private VAPID key |
+| `VAPID_SUBJECT` | PWA push — mailto contact (e.g. `mailto:admin@example.com`) |
 
 ### Route protection (`proxy.ts`)
 
 - Reads session via `getSessionFromHeaders()` from `auth.service`.
-- Public paths: `/sign-in`, `/sign-up`, `/api/auth`.
-- Unauthenticated → redirect to `/sign-in?callbackURL=...`.
-- Authenticated on auth pages → redirect to `/`.
+- **Auth paths** (redirect to `/` when already signed in): `/sign-in`, `/sign-up`.
+- **Public paths** (no sign-in required): `/sign-in`, `/sign-up`, `/landing`.
+- Unauthenticated on protected routes → redirect to `/sign-in?callbackURL=...`.
 
 ### Auth UI
 
@@ -323,13 +343,13 @@ No client-side auth SDK. Sign-in/up/out goes through `auth.actions.ts`. Protecte
 
 | Path | Responsibility |
 |------|----------------|
-| `app/layout.tsx` | Root layout: fonts (Geist), `globals.css`, HTML shell |
-| `app/page.tsx` | Home; session display; links to users; `signOutAction` form |
+| `app/layout.tsx` | Root layout: Manrope + Inter fonts, `globals.css`, light-only theme |
+| `app/page.tsx` | Home; session; links to `/users` and `/landing`; `PwaPanel`; `signOutAction` |
 | `app/sign-in/page.tsx` | Suspense wrapper → `SignInForm` organism |
 | `app/sign-up/page.tsx` | Suspense wrapper → `SignUpForm` organism |
 | `app/users/page.tsx` | `getUsersAction()` → `UsersTable` |
-| `app/users/teachers/page.tsx` | `getDevUsersAction()` → `UsersTable` (title: "Dev team") |
-| `app/globals.css` | Global styles (Tailwind entry) |
+| `app/landing/page.tsx` | PWA install landing — `InstallLanding` (public); embeds `PwaPanel` + `StoragePanel` |
+| `app/globals.css` | Design tokens (surface, primary, secondary), futuristic utilities |
 
 **Pattern:** Server Components call **actions** for gated data. Interactive UI lives in client components under `components/`. Mutations go through **actions** (server) or **UI hooks** (client handlers that call actions). Auth forms and proxy use **services** for session checks.
 
@@ -356,8 +376,8 @@ components/organisms/UsersTable/
 | Layer | Path | Examples |
 |-------|------|----------|
 | **Atoms** | `components/atoms/<Name>/` | `Button/`, `Label/`, `Input/` |
-| **Molecules** | `components/molecules/<Name>/` | `UserCard/`, `LabelInput/` |
-| **Organisms** | `components/organisms/<Name>/` | `UsersTable/`, `SignInForm/`, `SignUpForm/`, `AuthShell/` |
+| **Molecules** | `components/molecules/<Name>/` | `UserCard/`, `LabelInput/`, `FuturisticBackdrop/`, `DesktopWindowFrame/` |
+| **Organisms** | `components/organisms/<Name>/` | `UsersTable/`, `SignInForm/`, `InstallLanding/`, `PwaPanel/`, `StoragePanel/` |
 
 ### Actions vs UI hooks
 
@@ -376,6 +396,134 @@ components/organisms/UsersTable/
 - **Data from server:** Pages pass serializable props into organisms.
 - **Imports:** UI types from `@/lib/entities/...`. UI must **not** import `database/` or use cases directly.
 - **Forms:** Use `LabelInput` molecule + `Button` atom. Field definitions live in organism hooks (`signInForm.hooks.ts` exports `fields: LabelInputField[]`).
+
+---
+
+## PWA (Progressive Web App)
+
+Installable PWA following the [Next.js PWA guide](https://nextjs.org/docs/app/guides/progressive-web-apps). Primary install UX at **`/landing`** (public). Home page includes a compact push demo; full install + storage demos live on the landing page.
+
+### Install landing layout (`InstallLanding`)
+
+Desktop-first public page (`max-w-[1360px]`):
+
+1. **Header** — Home link, install status `StatusOrb`
+2. **Hero** (`xl:grid-cols-[1.25fr_0.95fr]`) — Desktop copy, install CTA, stats row; right column shows `DesktopWindowFrame` preview
+3. **Steps** — Horizontal 3-step timeline on `lg+` (`lg:grid-cols-3`)
+4. **Demos** — `PwaPanel` + `StoragePanel` side by side on `xl+` (`xl:grid-cols-2`), each in a `futuristic-frame` card with `embedded` + shared hook `controls`
+
+### Files
+
+| Path | Role |
+|------|------|
+| `app/landing/page.tsx` | Install landing — `InstallLanding` organism |
+| `components/organisms/InstallLanding/` | Desktop hero, steps, embeds `PwaPanel` + `StoragePanel` |
+| `components/molecules/DesktopWindowFrame/` | Window chrome for standalone PWA preview |
+| `components/molecules/FuturisticBackdrop/` | Lines + dots background (teal palette) |
+| `app/manifest.ts` | Web app manifest (name, icons, `display: standalone`) |
+| `public/icon.svg` | App icon (replace with PNG 192/512 for production) |
+| `public/sw.js` | Service worker — handles push events and notification clicks |
+| `next.config.ts` | Security headers for all routes + `sw.js` (no-cache, CSP) |
+| `components/organisms/PwaPanel/` | Install hints + push subscribe UI (`pwaPanel.hooks.ts`) |
+| `lib/domain/actions/push.actions.ts` | `subscribeUser`, `unsubscribeUser`, `sendNotification` |
+
+### Push notifications
+
+1. Generate VAPID keys: `npx web-push generate-vapid-keys`
+2. Set `NEXT_PUBLIC_VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` in `.env`
+3. Run dev with HTTPS: `npx next dev --experimental-https`
+4. Open `/landing` or home → Subscribe → Send test
+
+`push.actions.ts` skips AAA (demo only; in-memory subscription). Production apps should persist subscriptions in the database.
+
+### Install criteria
+
+- Valid manifest (`app/manifest.ts`)
+- Served over HTTPS (production) or `--experimental-https` (local push testing)
+- iOS: Share → Add to Home Screen (see `InstallLanding` / `PwaPanel` hints)
+- `beforeinstallprompt` handled in `pwaPanel.hooks.ts` for Chrome/Edge install button
+
+---
+
+## Local storage (IndexedDB + Storage API)
+
+Browser-side PWA storage demo on **`/landing`**, following the [Storage API](https://whatpwacando.today/storage) pattern.
+
+### Flow
+
+```
+storagePanel.hooks.ts  →  storage.actions.ts  →  storage.service.ts  →  usecases/storage/  →  IndexedDB / navigator.storage
+```
+
+**Browser-only** — no `"use server"`. Import `storage.actions.ts` from client hooks only.
+
+### Use cases (`lib/domain/usecases/storage/`)
+
+| File | Purpose |
+|------|---------|
+| `open_idb.usecase.ts` | Open `rnd_pwa` IndexedDB, run transactions |
+| `get_storage_estimate.usecase.ts` | `navigator.storage.estimate()` — quota + usage |
+| `check_persistent_storage.usecase.ts` | `navigator.storage.persisted()` |
+| `request_persistent_storage.usecase.ts` | `navigator.storage.persist()` |
+| `save_local_record.usecase.ts` | Save key/value to IndexedDB `records` store |
+| `list_local_records.usecase.ts` | List all records |
+| `delete_local_record.usecase.ts` | Delete by id |
+
+### UI
+
+| Path | Role |
+|------|------|
+| `components/organisms/StoragePanel/` | Quota card, persistent storage, IndexedDB demo (`StoragePanelView` + `storagePanel.hooks.ts`) |
+| `lib/entities/storage.type.ts` | `StorageResult`, `LocalRecord`, `formatBytes()` |
+
+**Layout:** Full-width header (title + `StatusOrb`) → quota metrics + progress bar + usage-detail chips → persistent storage and IndexedDB sections. When `embedded={true}` (inside landing’s half-column), bottom sections stack vertically; standalone mode uses `lg:grid-cols-2`.
+
+`storage.actions.ts` skips AAA (PWA demo).
+
+---
+
+## Design system
+
+UI follows **[DESIGN.MD](./DESIGN.MD)** — light-only, no dark mode.
+
+| Concern | Implementation |
+|---------|----------------|
+| Palette | Teal primary (`#0a5c66`), ochre secondary — CSS vars in `app/globals.css` |
+| Typography | Manrope (display) + Inter (body) |
+| Surfaces | Tonal layering — no 1px borders; use `surface-container-*` backgrounds |
+| Buttons | Gradient primary, `active:scale-[0.98]` |
+| Status | `StatusOrb` atom for install/persist states |
+| Landing | `FuturisticBackdrop` — SVG lines, dot grid; `DesktopWindowFrame` — window chrome preview |
+
+`html { color-scheme: light; }` locks light mode in the browser.
+
+---
+
+## Local development — Docker MySQL
+
+`docker-compose.yml` runs MySQL as **drizzle-mysql** on **host port 3307** to avoid conflicting with a local MySQL on 3306.
+
+```bash
+docker compose up -d
+npm run db:migrate
+npm run dev
+```
+
+| Setting | Default |
+|---------|---------|
+| Container name | `drizzle-mysql` |
+| Host port | `3307` → container `3306` |
+| Database | `rnd_template` (created on first start) |
+| Root password | `123` (match in `.env` and compose) |
+| Volume | `drizzle_mysql_data` |
+
+**Troubleshooting**
+
+| Symptom | Fix |
+|---------|-----|
+| `Unknown database 'rnd_template'` | Wrong port in `.env` — use `3307` for Docker |
+| `Failed to get session` after container restart | MySQL was down; wait for `ready for connections`, restart dev server |
+| Schema out of date | `npm run db:generate` then `npm run db:migrate` |
 
 ---
 
@@ -453,8 +601,8 @@ flowchart LR
 | Use cases | `get_users.usecase.ts`, `get_users_by_role.usecase.ts`, `delete_user.usecase.ts` |
 | Service | `lib/domain/services/users.service.ts` |
 | Actions | `lib/domain/actions/users.actions.ts` → `getUsersAction`, `getDevUsersAction`, `deleteUserAction` |
-| Pages | `app/users/page.tsx`, `app/users/teachers/page.tsx` |
-| UI | `UserCard` (delete), `UsersTable` (list) |
+| Pages | `app/users/page.tsx`, `app/landing/page.tsx` |
+| UI | `UserCard`, `UsersTable`, `InstallLanding`, `PwaPanel`, `StoragePanel` |
 
 ### 2. Add UI for a table
 
@@ -636,7 +784,7 @@ export const UserCard = ({ user, redirectTo = "/users" }: UserCardProps) => {
   const { handleDelete } = useUserCard(redirectTo);
 
   return (
-    <div className="flex justify-between items-center p-4 border rounded-lg shadow-sm bg-white dark:bg-zinc-900 dark:border-zinc-800">
+    <div className="flex items-center justify-between rounded-2xl bg-surface-container-lowest p-4 shadow-bloom">
       <div>
         <h2 className="text-lg font-semibold">{user.name}</h2>
         <p className="text-sm text-gray-500">{user.email}</p>
@@ -851,17 +999,23 @@ export const user = mysqlTable("user", {
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionFromHeaders } from "@/lib/domain/services/auth.service";
 
+const authPaths = ["/sign-in", "/sign-up"];
+const publicPaths = ["/sign-in", "/sign-up", "/landing"];
+
+function matchesPath(pathname: string, paths: string[]) {
+  return paths.some((path) => pathname === path || pathname.startsWith(`${path}/`));
+}
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   if (pathname.startsWith("/api/auth")) return NextResponse.next();
 
   const session = await getSessionFromHeaders(request.headers);
-  const publicPaths = ["/sign-in", "/sign-up"];
 
-  if (session && publicPaths.includes(pathname)) {
+  if (session && matchesPath(pathname, authPaths)) {
     return NextResponse.redirect(new URL("/", request.url));
   }
-  if (!session && !publicPaths.includes(pathname)) {
+  if (!session && !matchesPath(pathname, publicPaths)) {
     const signInUrl = new URL("/sign-in", request.url);
     signInUrl.searchParams.set("callbackURL", pathname);
     return NextResponse.redirect(signInUrl);
@@ -880,7 +1034,7 @@ export async function proxy(request: NextRequest) {
     "start": "next start",
     "lint": "eslint",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "bun scripts/migrate.mts",
+    "db:migrate": "npx tsx scripts/migrate.mts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio"
   },
@@ -890,7 +1044,8 @@ export async function proxy(request: NextRequest) {
     "mysql2": "^3.22.5",
     "next": "16.2.4",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "web-push": "^3.6.7"
   }
 }
 ```
@@ -899,7 +1054,7 @@ export async function proxy(request: NextRequest) {
 
 ## Cross-cutting concerns
 
-- **Environment:** `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` required for auth and DB.
+- **Environment:** `DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` required for auth and DB. PWA push requires VAPID keys.
 - **Path alias:** `@/` maps to the project root.
 - **Separation:** UI depends on **entity types** only. Data access stays in use cases. **Gated reads and writes** enter via actions (AAA). **Session checks** for proxy/auth UI use services directly.
 - **AAA:** Authentication (`auth()`), Authorization (`hasPermission`), Accounting (`logAction`) — inline in each protected action. No shared wrapper module.
@@ -907,6 +1062,9 @@ export async function proxy(request: NextRequest) {
 - **Caching:** Use cases use `"use cache"`, `cacheLife("hours")`, `cacheTag("users")`. Mutations call `updateTag("users")`.
 - **No client auth SDK:** Forms and hooks invoke server actions; use cases call `auth.api.*`.
 - **Suspense:** Auth pages wrap async organisms in `<Suspense>` for `searchParams` / session reads.
+- **PWA:** Manifest at `app/manifest.ts`. Service worker at `/sw.js`. Desktop install landing at `/landing` with push + IndexedDB demos.
+- **Design:** Light-only tokens in `globals.css`. See [DESIGN.MD](./DESIGN.MD). Landing uses wide desktop layout + `DesktopWindowFrame`.
+- **Docker:** MySQL via `docker compose up -d` on port **3307** — keep `DATABASE_URL` in sync.
 
 ---
 

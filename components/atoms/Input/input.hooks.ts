@@ -1,3 +1,3 @@
 export function useInputStyles() {
-  return "w-full rounded-lg border border-zinc-300 px-4 py-3 text-black outline-none focus:border-black dark:border-zinc-700 dark:bg-zinc-900 dark:text-white dark:focus:border-white";
+  return "w-full rounded-xl bg-surface-container-low px-4 py-3 text-sm text-on-surface outline-none transition-colors input-glow focus:bg-surface-container-lowest placeholder:text-on-surface-muted";
 }

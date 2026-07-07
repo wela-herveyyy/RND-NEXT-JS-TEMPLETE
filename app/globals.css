@@ -1,26 +1,152 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Layer 0 — canvas */
+  --surface: #f6fafa;
+  --on-surface: #181c1d;
+
+  /* Surface hierarchy */
+  --surface-container-low: #f0f4f4;
+  --surface-container-lowest: #ffffff;
+  --surface-container-high: #e8ecec;
+  --surface-container-highest: #dee4e4;
+  --surface-bright: #f6fafa;
+  --surface-variant: #dce4e4;
+
+  /* Brand */
+  --primary: #0a5c66;
+  --primary-container: #0d8494;
+  --on-primary: #ffffff;
+  --secondary: #c76a1a;
+  --secondary-container: #f4dcc8;
+  --on-secondary: #ffffff;
+  --tertiary: #004f4f;
+
+  /* Utility */
+  --outline-variant: #bfc8cd;
+  --on-surface-muted: #5c6568;
+
+  --shadow-bloom: 0 12px 32px rgb(24 28 29 / 4%);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-surface: var(--surface);
+  --color-on-surface: var(--on-surface);
+  --color-on-surface-muted: var(--on-surface-muted);
+  --color-surface-container-low: var(--surface-container-low);
+  --color-surface-container-lowest: var(--surface-container-lowest);
+  --color-surface-container-high: var(--surface-container-high);
+  --color-surface-container-highest: var(--surface-container-highest);
+  --color-surface-bright: var(--surface-bright);
+  --color-surface-variant: var(--surface-variant);
+  --color-primary: var(--primary);
+  --color-primary-container: var(--primary-container);
+  --color-on-primary: var(--on-primary);
+  --color-secondary: var(--secondary);
+  --color-secondary-container: var(--secondary-container);
+  --color-on-secondary: var(--on-secondary);
+  --color-tertiary: var(--tertiary);
+  --color-outline-variant: var(--outline-variant);
+  --font-display: var(--font-manrope);
+  --font-body: var(--font-inter);
+  --shadow-bloom: var(--shadow-bloom);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--surface);
+  color: var(--on-surface);
+  font-family: var(--font-inter), system-ui, sans-serif;
 }
+
+html {
+  color-scheme: light;
+}
+
+.font-display {
+  font-family: var(--font-manrope), system-ui, sans-serif;
+}
+
+.btn-primary-gradient {
+  background: linear-gradient(135deg, var(--primary) 0%, var(--primary-container) 100%);
+}
+
+.glass-panel {
+  background: color-mix(in srgb, var(--surface-variant) 70%, transparent);
+  backdrop-filter: blur(20px);
+}
+
+.ghost-border {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--outline-variant) 15%, transparent);
+}
+
+.input-glow:focus {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 35%, transparent);
+}
+
+.futuristic-dots {
+  background-image: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--primary) 28%, transparent) 1px,
+    transparent 1px
+  );
+  background-size: 32px 32px;
+  mask-image: radial-gradient(ellipse 90% 80% at 50% 40%, black 15%, transparent 80%);
+  opacity: 0.45;
+}
+
+.futuristic-glow {
+  background:
+    radial-gradient(ellipse 50% 40% at 15% 20%, color-mix(in srgb, var(--primary-container) 18%, transparent), transparent 70%),
+    radial-gradient(ellipse 45% 35% at 85% 75%, color-mix(in srgb, var(--secondary) 12%, transparent), transparent 70%),
+    radial-gradient(ellipse 60% 50% at 50% 100%, color-mix(in srgb, var(--tertiary) 8%, transparent), transparent 65%);
+}
+
+.futuristic-pulse {
+  animation: futuristic-pulse 3s ease-in-out infinite;
+}
+
+@keyframes futuristic-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+.futuristic-frame {
+  position: relative;
+}
+
+.futuristic-frame::before,
+.futuristic-frame::after {
+  content: "";
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  pointer-events: none;
+}
+
+.futuristic-frame::before {
+  top: 12px;
+  left: 12px;
+  border-top: 2px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--primary) 45%, transparent);
+}
+
+.futuristic-frame::after {
+  right: 12px;
+  bottom: 12px;
+  border-right: 2px solid color-mix(in srgb, var(--primary-container) 45%, transparent);
+  border-bottom: 2px solid color-mix(in srgb, var(--primary-container) 45%, transparent);
+}
+
+.futuristic-card-grid {
+  background-image:
+    linear-gradient(color-mix(in srgb, var(--primary) 6%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--primary) 6%, transparent) 1px, transparent 1px);
+  background-size: 20px 20px;
+  mask-image: linear-gradient(to bottom, black 60%, transparent);
+}
+

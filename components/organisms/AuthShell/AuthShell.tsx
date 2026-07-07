@@ -11,11 +11,11 @@ export function AuthShell({ title, description, children }: AuthShellProps) {
   const content = getAuthShellContent(title, description);
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-6 dark:bg-black">
-      <main className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+    <div className="flex min-h-screen items-center justify-center bg-surface px-6">
+      <main className="w-full max-w-md rounded-2xl bg-surface-container-lowest p-8 shadow-bloom">
         <div className="mb-8 text-center">
-          <h1 className="text-3xl font-bold text-black dark:text-white">{content.title}</h1>
-          <p className="mt-2 text-sm text-zinc-600 dark:text-zinc-400">{content.description}</p>
+          <h1 className="font-display text-3xl font-semibold text-on-surface">{content.title}</h1>
+          <p className="mt-2 text-sm text-on-surface-muted">{content.description}</p>
         </div>
         {children}
       </main>

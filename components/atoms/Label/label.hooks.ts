@@ -1,3 +1,3 @@
 export function useLabelStyles() {
-  return "text-sm font-medium text-zinc-700 dark:text-zinc-300";
+  return "text-sm font-medium text-on-surface";
 }

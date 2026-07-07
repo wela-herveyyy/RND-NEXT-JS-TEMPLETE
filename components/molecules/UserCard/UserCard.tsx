@@ -13,10 +13,10 @@ export const UserCard = ({ user, redirectTo = "/users" }: UserCardProps) => {
   const { handleDelete } = useUserCard(redirectTo);
 
   return (
-    <div className="flex justify-between items-center p-4 border rounded-lg shadow-sm bg-white dark:bg-zinc-900 dark:border-zinc-800">
+    <div className="flex items-center justify-between rounded-2xl bg-surface-container-lowest p-4 shadow-bloom">
       <div>
         <h2 className="text-lg font-semibold">{user.name}</h2>
-        <p className="text-sm text-gray-500">{user.email}</p>
+        <p className="text-sm text-on-surface-muted">{user.email}</p>
       </div>
       <Button onClick={() => handleDelete(user.id)} variant="danger">
         Delete

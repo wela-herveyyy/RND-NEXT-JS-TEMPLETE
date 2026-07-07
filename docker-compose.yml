@@ -1,0 +1,15 @@
+services:
+  mysql:
+    image: mysql:latest
+    container_name: drizzle-mysql
+    restart: unless-stopped
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: "123"
+      MYSQL_DATABASE: rnd_template
+    volumes:
+      - drizzle_mysql_data:/var/lib/mysql
+
+volumes:
+  drizzle_mysql_data:
