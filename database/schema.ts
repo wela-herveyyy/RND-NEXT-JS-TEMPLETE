@@ -81,4 +81,3 @@ export const verification = mysqlTable(
   },
   (table) => [index("verification_identifier_idx").on(table.identifier)],
 );
-

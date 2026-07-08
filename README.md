@@ -28,17 +28,17 @@ For the full structural reference, see [ARCHITECTURE.md](./ARCHITECTURE.md). UI 
 
 ### Prerequisites
 
-- **Node.js** 20+
+- **Bun** — install: `npm install -g bun`; upgrade: `bun upgrade` (this repo uses `bun.lock`)
 - **Docker** (recommended for MySQL) or local MySQL 8+
 
 ### Setup
 
 ```bash
-npm install
+bun install
 cp example.env .env
 docker compose up -d          # MySQL on host port 3307
-npm run db:migrate
-npm run dev
+bun run db:migrate
+bun run dev
 ```
 
 `DATABASE_URL` in `.env` defaults to `mysql://root:123@127.0.0.1:3307/rnd_template` (see [Docker MySQL](#docker-mysql)).
@@ -46,8 +46,8 @@ npm run dev
 After schema changes:
 
 ```bash
-npm run db:generate
-npm run db:migrate
+bun run db:generate
+bun run db:migrate
 ```
 
 New sign-ups get role `dev` (schema default). Promote yourself after sign-up:
@@ -159,7 +159,7 @@ Full docs: [ARCHITECTURE.md — AAA template](./ARCHITECTURE.md#aaa-in-actions-i
 ```bash
 docker compose up -d      # start
 docker compose down       # stop
-npm run db:migrate        # apply schema
+bun run db:migrate        # apply schema
 ```
 
 | Setting | Value |
@@ -194,8 +194,8 @@ Installable progressive web app. Primary install UX lives at **`/landing`** (pub
 **Push setup:**
 
 ```bash
-npx web-push generate-vapid-keys
-npx next dev --experimental-https
+bunx web-push generate-vapid-keys
+bunx next dev --experimental-https
 ```
 
 Add VAPID keys to `.env`. Open [`/landing`](/landing) or home for push/storage demos.

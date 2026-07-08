@@ -12,7 +12,7 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
 - [Dependencies](#dependencies)
   - [Runtime](#runtime-dependencies)
   - [Development](#development-devdependencies)
-  - [npm scripts (database)](#npm-scripts-database)
+  - [Package scripts (database)](#package-scripts-database)
 - [Repository layout (high level)](#repository-layout-high-level)
 - [Domain layer — request flow](#domain-layer--request-flow)
   - [Reads vs writes](#reads-vs-writes)
@@ -63,6 +63,7 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
 | UI fonts | **Manrope** (display) + **Inter** (body) | Loaded in `app/layout.tsx`; tokens in `app/globals.css` |
 | UI theme | Light-only design tokens | Teal/ochre palette — see [DESIGN.MD](./DESIGN.MD) |
 | Linting | **ESLint 9** + **eslint-config-next** (`16.2.4`) | Aligned with Next.js major version |
+| Package manager | **Bun** | `bun.lock`; run scripts with `bun run <script>` |
 
 ---
 
@@ -95,7 +96,9 @@ This document describes how **rnd-nextjs-template** is structured: runtime stack
 | `eslint-config-next` | `16.2.4` | Next.js ESLint preset |
 | `drizzle-kit` | `^0.31.10` | Migrations / Drizzle CLI (`drizzle.config.ts`) |
 
-### npm scripts (database)
+### Package scripts (database)
+
+Run with `bun run <script>` (e.g. `bun run db:migrate`).
 
 | Script | Command | Purpose |
 |--------|---------|---------|
@@ -429,9 +432,9 @@ Desktop-first public page (`max-w-[1360px]`):
 
 ### Push notifications
 
-1. Generate VAPID keys: `npx web-push generate-vapid-keys`
+1. Generate VAPID keys: `bunx web-push generate-vapid-keys`
 2. Set `NEXT_PUBLIC_VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` in `.env`
-3. Run dev with HTTPS: `npx next dev --experimental-https`
+3. Run dev with HTTPS: `bunx next dev --experimental-https`
 4. Open `/landing` or home → Subscribe → Send test
 
 `push.actions.ts` skips AAA (demo only; in-memory subscription). Production apps should persist subscriptions in the database.
@@ -505,8 +508,8 @@ UI follows **[DESIGN.MD](./DESIGN.MD)** — light-only, no dark mode.
 
 ```bash
 docker compose up -d
-npm run db:migrate
-npm run dev
+bun run db:migrate
+bun run dev
 ```
 
 | Setting | Default |
@@ -523,7 +526,7 @@ npm run dev
 |---------|-----|
 | `Unknown database 'rnd_template'` | Wrong port in `.env` — use `3307` for Docker |
 | `Failed to get session` after container restart | MySQL was down; wait for `ready for connections`, restart dev server |
-| Schema out of date | `npm run db:generate` then `npm run db:migrate` |
+| Schema out of date | `bun run db:generate` then `bun run db:migrate` |
 
 ---
 
@@ -585,7 +588,7 @@ flowchart LR
 
 | Step | Path | What to do |
 |------|------|------------|
-| 1 | `database/schema.ts` | Add table. Run `npm run db:generate` + `npm run db:migrate`. |
+| 1 | `database/schema.ts` | Add table. Run `bun run db:generate` + `bun run db:migrate`. |
 | 2 | `lib/entities/<table>.type.ts` | `$inferSelect`, `$inferInsert`, result types, constants. |
 | 3 | `lib/domain/usecases/<table>/` | One file per operation. Reads: `"use cache"`. Writes: `updateTag`. |
 | 4 | `lib/domain/services/<table>.service.ts` | Compose use cases. |
@@ -1049,6 +1052,8 @@ export async function proxy(request: NextRequest) {
   }
 }
 ```
+
+Run scripts with `bun run <script>` (e.g. `bun run dev`, `bun run db:migrate`).
 
 ---
 

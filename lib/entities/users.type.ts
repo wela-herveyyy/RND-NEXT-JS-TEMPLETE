@@ -53,3 +53,4 @@ export type UserResult<T = void> =
 export type DeleteUserInput = {
   id: string;
 };
+
